@@ -18,6 +18,7 @@ const STORAGE_SIGNED_URL_REFRESH_MARGIN_MS = 5 * 60 * 1000
 const LOGIN_FUNCTION_URL = '/.netlify/functions/login-with-code'
 const ROTATE_CODES_FUNCTION_URL = '/.netlify/functions/rotate-access-codes'
 const SAVE_SNAPSHOT_FUNCTION_URL = '/.netlify/functions/save-admin-snapshot'
+const IMPORT_DRIVE_VIDEOS_FUNCTION_URL = '/.netlify/functions/import-drive-videos'
 
 export class VideoHubApiError extends Error {
   constructor(message, { code = '', details = '', cause } = {}) {
@@ -149,6 +150,24 @@ async function requestFunction(url, { body, accessToken } = {}) {
     })
   }
   return payload
+}
+
+async function dispatchDriveVideoImports(videoIds, accessToken) {
+  const ids = [...new Set((videoIds || []).filter(isUuid))].slice(0, 10)
+  if (!ids.length || !accessToken) return
+
+  const requests = await Promise.allSettled(ids.map((videoId) => requestFunction(IMPORT_DRIVE_VIDEOS_FUNCTION_URL, {
+    accessToken,
+    body: { videoIds: [videoId] },
+  })))
+  const failedRequest = requests.find((result) => result.status === 'rejected')
+  if (failedRequest) throw failedRequest.reason
+}
+
+export async function queueDriveVideoImports(videoIds) {
+  const session = await getCurrentSession()
+  if (!session?.access_token) return
+  await dispatchDriveVideoImports(videoIds, session.access_token)
 }
 
 async function selectRowsByIds(table, idColumn, ids, columns = '*') {
@@ -666,6 +685,15 @@ export async function saveAdminSnapshot(snapshot, options = {}) {
     throw new VideoHubApiError('No se pudo guardar la configuración.', {
       code: 'ATOMIC_SAVE_FAILED',
     })
+  }
+
+  const driveVideoIds = prepared.sourceRows
+    .filter((source) => source.provider === 'google_drive')
+    .map((source) => source.video_id)
+  if (driveVideoIds.length && atomicSave.drive_import_queued !== true) {
+    // La importación ocurre en segundo plano. Si se interrumpe, el enlace de
+    // Drive ya guardado sigue funcionando y un próximo guardado vuelve a intentar.
+    await dispatchDriveVideoImports(driveVideoIds, session.access_token)
   }
 
   const savedContext = {

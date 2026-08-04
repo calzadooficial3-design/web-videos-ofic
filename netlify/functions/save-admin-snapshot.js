@@ -7,6 +7,30 @@ import {
   ServerConfigurationError,
 } from './_shared/supabase-server.js'
 
+const DRIVE_IMPORT_FUNCTION_PATH = '/.netlify/functions/import-drive-videos'
+const MAX_QUEUED_DRIVE_IMPORTS = 10
+
+async function queueDriveImports(request, accessToken, snapshot) {
+  const videoIds = [...new Set(
+    (Array.isArray(snapshot?.video_sources) ? snapshot.video_sources : [])
+      .filter((source) => source?.provider === 'google_drive' && source?.video_id)
+      .map((source) => String(source.video_id)),
+  )].slice(0, MAX_QUEUED_DRIVE_IMPORTS)
+  if (!videoIds.length) return true
+
+  const functionUrl = new URL(DRIVE_IMPORT_FUNCTION_PATH, request.url).toString()
+  const requests = await Promise.allSettled(videoIds.map((videoId) => fetch(functionUrl, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ videoIds: [videoId] }),
+  })))
+
+  return requests.every((result) => result.status === 'fulfilled' && result.value.ok)
+}
+
 export default async function saveAdminSnapshot(request) {
   if (request.method !== 'POST') return methodNotAllowed()
 
@@ -89,7 +113,10 @@ export default async function saveAdminSnapshot(request) {
       return jsonResponse({ error: 'Supabase no confirmó la versión guardada.' }, 503)
     }
 
-    return jsonResponse({ ok: true, revision })
+    const driveImportQueued = await queueDriveImports(request, accessToken, snapshot)
+      .catch(() => false)
+
+    return jsonResponse({ ok: true, revision, drive_import_queued: driveImportQueued })
   } catch (error) {
     if (error instanceof ServerConfigurationError) {
       return jsonResponse({
