@@ -48,6 +48,7 @@ import {
   loadVideoHubSnapshot,
   loginWithCode as authenticateWithCode,
   onAuthStateChange,
+  queueDriveVideoImports,
   rotateAccessCodes,
   saveAdminSnapshot,
   signOut,
@@ -112,6 +113,21 @@ function getVideoAudience(video) {
   return 'none'
 }
 
+function getPersistedVideoSource(video) {
+  const source = getVideoSource(video?.url || '')
+  const originalProvider = video?.source?.metadata?.originalProvider
+
+  if (
+    video?.source?.provider === 'supabase_storage'
+    && originalProvider === 'google_drive'
+    && source.type === 'video'
+  ) {
+    return { ...source, label: 'Google Drive', originalProvider }
+  }
+
+  return source
+}
+
 function editableSnapshotFingerprint(snapshot) {
   if (!snapshot) return ''
   return JSON.stringify({
@@ -163,6 +179,7 @@ function App() {
   const saveRevisionRef = useRef(0)
   const contentRevisionTrackerRef = useRef(null)
   const backgroundRefreshRef = useRef(false)
+  const driveImportRequestKeyRef = useRef('')
   const sessionUserIdRef = useRef(null)
   const loginInProgressRef = useRef(false)
 
@@ -184,6 +201,7 @@ function App() {
     setData(null)
     latestDataRef.current = null
     lastSavedFingerprintRef.current = ''
+    driveImportRequestKeyRef.current = ''
     contentRevisionTrackerRef.current.reset()
     setLoadingData(false)
     setLoadError('')
@@ -404,6 +422,30 @@ function App() {
   }, [accessContext, clearAuthenticatedState, session?.user?.id])
 
   useEffect(() => {
+    if (accessContext?.role !== 'admin' || !data?.videos?.length) return
+
+    const driveVideos = data.videos.filter((video) => video.source?.provider === 'google_drive')
+    const requestKey = driveVideos
+      .map((video) => `${video.id}:${video.source?.sourceRef || ''}`)
+      .sort()
+      .join('|')
+
+    if (!requestKey) {
+      driveImportRequestKeyRef.current = ''
+      return
+    }
+    if (driveImportRequestKeyRef.current === requestKey) return
+
+    driveImportRequestKeyRef.current = requestKey
+    queueDriveVideoImports(driveVideos.map((video) => video.id)).catch(() => {
+      // Netlify reintenta las ejecuciones fallidas; el enlace Drive se conserva.
+      if (driveImportRequestKeyRef.current === requestKey) {
+        driveImportRequestKeyRef.current = ''
+      }
+    })
+  }, [accessContext?.role, data?.videos])
+
+  useEffect(() => {
     const warnBeforeLeaving = (event) => {
       if (accessContext?.role !== 'admin' || !data) return
       if (editableSnapshotFingerprint(data) === lastSavedFingerprintRef.current) return
@@ -574,7 +616,7 @@ function ThemeToggle({ theme, onToggle, label = true }) {
 }
 
 function VideoThumbnail({ video, className = '' }) {
-  const source = getVideoSource(video?.url || '')
+  const source = getPersistedVideoSource(video)
   const preferredThumbnail = video?.thumbnailUrl?.trim() || source.thumbnailUrl || ''
   const [thumbnailUrl, setThumbnailUrl] = useState(preferredThumbnail)
   const [videoFailed, setVideoFailed] = useState(false)
@@ -915,7 +957,7 @@ function AdminOverview({ data, onNavigate }) {
           <div className="panel-heading"><div><h2>Contenido reciente</h2><p>Últimos videos agregados</p></div><button className="text-button" onClick={() => onNavigate('videos')}>Ver biblioteca <ArrowRight size={15} /></button></div>
           <div className="recent-list">
             {[...data.videos].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 4).map((video) => {
-              const source = getVideoSource(video.url)
+              const source = getPersistedVideoSource(video)
               return (
                 <div className="recent-row" key={video.id}>
                   <div className="mini-thumbnail"><VideoThumbnail video={video} /><Play size={16} fill="currentColor" /></div>
@@ -1150,7 +1192,7 @@ function VideosManager({ data, setData }) {
               <div className="form-group"><label>Descripción</label><textarea value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="Explica brevemente qué aprenderá la persona…" rows="4" /></div>
               <div className="form-group"><label>Enlace del video</label><div className="url-input"><UploadCloud size={18} /><input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="Pega un enlace de YouTube, Google Drive, Vimeo o MP4" maxLength="2048" /></div>{draft.url && <small className={`source-detection source-detection--${source.type}`}><i style={{ background: getSourceAccent(source.label) }} /> {source.label}</small>}<small>En Google Drive, configura el archivo como “Cualquier persona con el enlace”.</small></div>
               <div className="thumbnail-config">
-                <div className="form-group"><label>Miniatura personalizada <span>(opcional)</span></label><div className="url-input"><ImageIcon size={18} /><input value={draft.thumbnailUrl} onChange={(event) => setDraft({ ...draft, thumbnailUrl: event.target.value })} placeholder="Se obtiene automáticamente; pega una imagen solo si quieres reemplazarla" maxLength="2048" /></div><small>YouTube, Drive, Vimeo y Loom generan su imagen automáticamente. Los archivos directos muestran el fotograma del segundo 3.</small></div>
+                <div className="form-group"><label>Miniatura personalizada <span>(opcional)</span></label><div className="url-input"><ImageIcon size={18} /><input value={draft.thumbnailUrl} onChange={(event) => setDraft({ ...draft, thumbnailUrl: event.target.value })} placeholder="Se obtiene automáticamente; pega una imagen solo si quieres reemplazarla" maxLength="2048" /></div><small>Drive y los archivos directos muestran el fotograma del segundo 4. YouTube, Vimeo y Loom usan la imagen del proveedor.</small></div>
                 <div className="thumbnail-preview"><VideoThumbnail video={{ title: draft.title || 'Vista previa', url: draft.url, thumbnailUrl: draft.thumbnailUrl }} /><span><ImageIcon size={18} /></span><small>VISTA PREVIA</small></div>
               </div>
               <div className="form-row"><div className="form-group"><label>Duración (opcional)</label><input value={draft.duration} onChange={(event) => setDraft({ ...draft, duration: event.target.value })} placeholder="Ej. 05:30" maxLength="20" /></div><label className="feature-check"><input type="checkbox" checked={draft.featured} onChange={(event) => setDraft({ ...draft, featured: event.target.checked })} /><span><Sparkles size={16} /></span><div><strong>Video destacado</strong><small>Aparecerá primero en el inicio</small></div></label></div>
@@ -1200,7 +1242,7 @@ function VideosManager({ data, setData }) {
 }
 
 function AdminVideoCard({ video, data, onEdit, onDelete }) {
-  const source = getVideoSource(video.url)
+  const source = getPersistedVideoSource(video)
   const audience = getVideoAudience(video)
   const audienceMeta = AUDIENCE_META[audience]
   const lockedRoles = VIEWER_ROLES.filter((role) => isVideoLockedFor(video, role))
@@ -1485,7 +1527,7 @@ function VideoListing({ role, title, subtitle, videos, onPlay }) {
 
 function ViewerVideoCard({ role, video, section, onPlay }) {
   const locked = isVideoLockedFor(video, role)
-  const source = locked ? null : getVideoSource(video.url)
+  const source = locked ? null : getPersistedVideoSource(video)
   const handlePlay = (event) => {
     event.stopPropagation()
     if (!locked) onPlay()
@@ -1498,14 +1540,29 @@ function ViewerVideoCard({ role, video, section, onPlay }) {
   )
 }
 
+function VideoPlayerMedia({ source, title }) {
+  const frameClassName = source.provider === 'google_drive'
+    ? 'video-frame video-frame--google-drive'
+    : 'video-frame'
+
+  return (
+    <div className={frameClassName} data-player-mode={source.type}>
+      {source.type === 'video' ? (
+        <video src={source.embedUrl} controls preload="metadata" playsInline />
+      ) : source.type === 'iframe' ? (
+        <iframe src={source.embedUrl} title={title} referrerPolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen />
+      ) : (
+        <div className="video-error"><Film size={32} /><p>No se pudo cargar este enlace.</p></div>
+      )}
+    </div>
+  )
+}
+
 function VideoPlayerPage({ video, role, data, onBack, onPlay }) {
   if (!isVideoAssignedTo(video, role) || isVideoLockedFor(video, role)) {
     return <div className="player-page"><button className="back-button" onClick={onBack}><ArrowLeft size={17} /> Volver a la biblioteca</button><div className="player-blocked-state"><span><LockKeyhole size={28} /></span><h2>Este video está bloqueado</h2><p>El administrador no ha habilitado su reproducción para tu rol.</p></div></div>
   }
-  const source = getVideoSource(video.url)
-  const frameClassName = source.provider === 'google_drive'
-    ? 'video-frame video-frame--google-drive'
-    : 'video-frame'
+  const source = getPersistedVideoSource(video)
   const section = data.sections.find((item) => item.id === video.assignments[role])
   const related = data.videos.filter((item) => item.id !== video.id && item.assignments[role] === video.assignments[role] && !isVideoLockedFor(item, role)).slice(0, 3)
   return (
@@ -1513,9 +1570,7 @@ function VideoPlayerPage({ video, role, data, onBack, onPlay }) {
       <button className="back-button" onClick={onBack}><ArrowLeft size={17} /> Volver a la biblioteca</button>
       <div className="player-layout">
         <div>
-          <div className={frameClassName}>
-            {source.type === 'video' ? <video src={source.embedUrl} controls playsInline /> : source.type === 'iframe' ? <iframe src={source.embedUrl} title={video.title} referrerPolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen /> : <div className="video-error"><Film size={32} /><p>No se pudo cargar este enlace.</p></div>}
-          </div>
+          <VideoPlayerMedia source={source} title={video.title} />
           <div className="player-copy"><div className="player-meta"><span>{section?.name || 'Video'}</span><span><i style={{ background: getSourceAccent(source.label) }} />{source.label}</span><span><Clock3 size={14} /> {video.duration}</span></div><h1>{video.title}</h1><p>{video.description}</p></div>
         </div>
         <aside className="related-panel"><span className="eyebrow eyebrow--plain">A CONTINUACIÓN</span><h3>En esta sección</h3>{related.map((item) => <button key={item.id} onClick={() => onPlay(item)}><span><Play size={13} fill="currentColor" /></span><div><strong>{item.title}</strong><small>{item.duration}</small></div></button>)}{!related.length && <p>No hay más videos en esta sección.</p>}<div className="privacy-mini"><ShieldCheck size={17} /><span>Contenido autorizado para {ROLE_META[role].label}</span></div></aside>

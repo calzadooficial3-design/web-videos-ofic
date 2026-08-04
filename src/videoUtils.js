@@ -1,4 +1,4 @@
-export const VIDEO_THUMBNAIL_SECOND = 3
+export const VIDEO_THUMBNAIL_SECOND = 4
 
 export function getThumbnailSeekTime(duration, targetSecond = VIDEO_THUMBNAIL_SECOND) {
   const safeTarget = Number.isFinite(targetSecond) && targetSecond >= 0
