@@ -52,6 +52,7 @@ import {
   saveAdminSnapshot,
   signOut,
 } from './lib/videoHubApi'
+import { createAdminSaveRevisionTracker } from './lib/adminSaveRevision'
 import { getSourceAccent, getVideoSource, resolveVideoThumbnail } from './videoUtils'
 
 const THEME_KEY = 'aurea-video-hub-theme'
@@ -155,9 +156,14 @@ function App() {
   const saveTimerRef = useRef(null)
   const saveQueueRef = useRef(Promise.resolve())
   const saveRevisionRef = useRef(0)
+  const contentRevisionTrackerRef = useRef(null)
   const backgroundRefreshRef = useRef(false)
   const sessionUserIdRef = useRef(null)
   const loginInProgressRef = useRef(false)
+
+  if (!contentRevisionTrackerRef.current) {
+    contentRevisionTrackerRef.current = createAdminSaveRevisionTracker()
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -174,6 +180,7 @@ function App() {
     setData(null)
     latestDataRef.current = null
     lastSavedFingerprintRef.current = ''
+    contentRevisionTrackerRef.current.reset()
     setLoadingData(false)
     setLoadError('')
     setSaveState({ status: 'idle', error: '' })
@@ -196,6 +203,7 @@ function App() {
       const snapshot = await loadVideoHubSnapshot({ context })
       if (epoch !== loadEpochRef.current) return null
 
+      contentRevisionTrackerRef.current.reset(snapshot.revision)
       lastSavedFingerprintRef.current = editableSnapshotFingerprint(snapshot)
       latestDataRef.current = snapshot
       setAccessContext(context)
@@ -284,7 +292,11 @@ function App() {
         .then(async () => {
           if (revision < saveRevisionRef.current) return
           setSaveState({ status: 'saving', error: '' })
-          const savedSnapshot = await saveAdminSnapshot(snapshot, { context })
+          const savedSnapshot = await saveAdminSnapshot(
+            contentRevisionTrackerRef.current.rebase(snapshot),
+            { context },
+          )
+          contentRevisionTrackerRef.current.confirm(savedSnapshot.revision)
           if (revision === saveRevisionRef.current) {
             const savedFingerprint = editableSnapshotFingerprint(savedSnapshot)
             lastSavedFingerprintRef.current = savedFingerprint
@@ -352,6 +364,7 @@ function App() {
           && editableSnapshotFingerprint(latestData) !== lastSavedFingerprintRef.current
         ) return
 
+        contentRevisionTrackerRef.current.reset(snapshot.revision)
         lastSavedFingerprintRef.current = editableSnapshotFingerprint(snapshot)
         latestDataRef.current = snapshot
         if (
@@ -452,7 +465,11 @@ function App() {
         && editableSnapshotFingerprint(currentData) !== lastSavedFingerprintRef.current
       ) {
         setSaveState({ status: 'saving', error: '' })
-        const savedSnapshot = await saveAdminSnapshot(currentData, { context: accessContext })
+        const savedSnapshot = await saveAdminSnapshot(
+          contentRevisionTrackerRef.current.rebase(currentData),
+          { context: accessContext },
+        )
+        contentRevisionTrackerRef.current.confirm(savedSnapshot.revision)
         lastSavedFingerprintRef.current = editableSnapshotFingerprint(savedSnapshot)
       }
 
@@ -1101,14 +1118,14 @@ function VideosManager({ data, setData }) {
           <div className="manager-toolbar"><div><span className="eyebrow eyebrow--plain">{editingId ? 'EDITAR CONTENIDO' : 'NUEVO CONTENIDO'}</span><h2>{editingId ? 'Actualizar video' : 'Agregar un video'}</h2></div><button className="icon-button" onClick={() => setFormOpen(false)}><X size={19} /></button></div>
           <form className="video-form" onSubmit={saveVideo}>
             <div className="video-form__main">
-              <div className="form-group"><label>Título del video</label><input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Ej. Procedimiento de apertura" /></div>
+              <div className="form-group"><label>Título del video</label><input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Ej. Procedimiento de apertura" maxLength="180" /></div>
               <div className="form-group"><label>Descripción</label><textarea value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="Explica brevemente qué aprenderá la persona…" rows="4" /></div>
-              <div className="form-group"><label>Enlace del video</label><div className="url-input"><UploadCloud size={18} /><input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="Pega un enlace de YouTube, Google Drive, Vimeo o MP4" /></div>{draft.url && <small className={`source-detection source-detection--${source.type}`}><i style={{ background: getSourceAccent(source.label) }} /> {source.label}</small>}<small>En Google Drive, configura el archivo como “Cualquier persona con el enlace”.</small></div>
+              <div className="form-group"><label>Enlace del video</label><div className="url-input"><UploadCloud size={18} /><input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="Pega un enlace de YouTube, Google Drive, Vimeo o MP4" maxLength="2048" /></div>{draft.url && <small className={`source-detection source-detection--${source.type}`}><i style={{ background: getSourceAccent(source.label) }} /> {source.label}</small>}<small>En Google Drive, configura el archivo como “Cualquier persona con el enlace”.</small></div>
               <div className="thumbnail-config">
-                <div className="form-group"><label>Miniatura personalizada <span>(opcional)</span></label><div className="url-input"><ImageIcon size={18} /><input value={draft.thumbnailUrl} onChange={(event) => setDraft({ ...draft, thumbnailUrl: event.target.value })} placeholder="Se obtiene automáticamente; pega una imagen solo si quieres reemplazarla" /></div><small>YouTube, Drive, Vimeo y Loom generan su imagen automáticamente. Los MP4 muestran su primer fotograma.</small></div>
+                <div className="form-group"><label>Miniatura personalizada <span>(opcional)</span></label><div className="url-input"><ImageIcon size={18} /><input value={draft.thumbnailUrl} onChange={(event) => setDraft({ ...draft, thumbnailUrl: event.target.value })} placeholder="Se obtiene automáticamente; pega una imagen solo si quieres reemplazarla" maxLength="2048" /></div><small>YouTube, Drive, Vimeo y Loom generan su imagen automáticamente. Los MP4 muestran su primer fotograma.</small></div>
                 <div className="thumbnail-preview"><VideoThumbnail video={{ title: draft.title || 'Vista previa', url: draft.url, thumbnailUrl: draft.thumbnailUrl }} /><span><ImageIcon size={18} /></span><small>VISTA PREVIA</small></div>
               </div>
-              <div className="form-row"><div className="form-group"><label>Duración (opcional)</label><input value={draft.duration} onChange={(event) => setDraft({ ...draft, duration: event.target.value })} placeholder="Ej. 05:30" /></div><label className="feature-check"><input type="checkbox" checked={draft.featured} onChange={(event) => setDraft({ ...draft, featured: event.target.checked })} /><span><Sparkles size={16} /></span><div><strong>Video destacado</strong><small>Aparecerá primero en el inicio</small></div></label></div>
+              <div className="form-row"><div className="form-group"><label>Duración (opcional)</label><input value={draft.duration} onChange={(event) => setDraft({ ...draft, duration: event.target.value })} placeholder="Ej. 05:30" maxLength="20" /></div><label className="feature-check"><input type="checkbox" checked={draft.featured} onChange={(event) => setDraft({ ...draft, featured: event.target.checked })} /><span><Sparkles size={16} /></span><div><strong>Video destacado</strong><small>Aparecerá primero en el inicio</small></div></label></div>
             </div>
             <div className="assignment-box">
               <div><h3>Permisos y ubicación</h3><p>Elige exactamente quién lo verá y dónde aparecerá.</p></div>

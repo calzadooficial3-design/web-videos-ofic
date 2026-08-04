@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test:autosave": "node --test scripts/admin-save-revision.test.mjs",
     "check:supabase": "node scripts/check-supabase.mjs",
     "check:supabase-schema": "node scripts/check-supabase-schema.mjs",
     "provision:supabase-roles": "node scripts/provision-supabase-roles.mjs",
