@@ -53,7 +53,13 @@ import {
   signOut,
 } from './lib/videoHubApi'
 import { createAdminSaveRevisionTracker } from './lib/adminSaveRevision'
-import { getSourceAccent, getVideoSource, resolveVideoThumbnail } from './videoUtils'
+import {
+  getSourceAccent,
+  getThumbnailSeekTime,
+  getVideoSource,
+  getVideoThumbnailUrl,
+  resolveVideoThumbnail,
+} from './videoUtils'
 
 const EMPTY_DATA = {
   organization: 'Almacén de Remates',
@@ -572,11 +578,13 @@ function VideoThumbnail({ video, className = '' }) {
   const preferredThumbnail = video?.thumbnailUrl?.trim() || source.thumbnailUrl || ''
   const [thumbnailUrl, setThumbnailUrl] = useState(preferredThumbnail)
   const [videoFailed, setVideoFailed] = useState(false)
+  const [frameReady, setFrameReady] = useState(false)
 
   useEffect(() => {
     let active = true
     setThumbnailUrl(preferredThumbnail)
     setVideoFailed(false)
+    setFrameReady(false)
 
     if (!preferredThumbnail && source.provider === 'vimeo') {
       resolveVideoThumbnail(video.url).then((url) => {
@@ -600,15 +608,37 @@ function VideoThumbnail({ video, className = '' }) {
   }
 
   if (source.type === 'video' && !videoFailed) {
-    const frameUrl = source.embedUrl.includes('#') ? source.embedUrl : `${source.embedUrl}#t=0.1`
+    const frameUrl = getVideoThumbnailUrl(source.embedUrl)
+    const revealFrameIfReady = (element) => {
+      const target = getThumbnailSeekTime(element.duration)
+      if (!element.seeking && Math.abs(element.currentTime - target) <= 0.15) {
+        setFrameReady(true)
+      }
+    }
+
     return (
       <video
-        className={`video-thumbnail-media ${className}`}
+        key={frameUrl}
+        className={`video-thumbnail-media video-thumbnail-media--frame ${frameReady ? 'is-ready' : ''} ${className}`}
         src={frameUrl}
         preload="metadata"
         muted
         playsInline
         aria-label={`Miniatura de ${video.title || 'video'}`}
+        onLoadedMetadata={(event) => {
+          const element = event.currentTarget
+          const target = getThumbnailSeekTime(element.duration)
+
+          if (Math.abs(element.currentTime - target) <= 0.05) {
+            setFrameReady(true)
+            return
+          }
+
+          element.currentTime = target
+        }}
+        onLoadedData={(event) => revealFrameIfReady(event.currentTarget)}
+        onCanPlay={(event) => revealFrameIfReady(event.currentTarget)}
+        onSeeked={(event) => revealFrameIfReady(event.currentTarget)}
         onError={() => setVideoFailed(true)}
       />
     )
@@ -1120,7 +1150,7 @@ function VideosManager({ data, setData }) {
               <div className="form-group"><label>Descripción</label><textarea value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="Explica brevemente qué aprenderá la persona…" rows="4" /></div>
               <div className="form-group"><label>Enlace del video</label><div className="url-input"><UploadCloud size={18} /><input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="Pega un enlace de YouTube, Google Drive, Vimeo o MP4" maxLength="2048" /></div>{draft.url && <small className={`source-detection source-detection--${source.type}`}><i style={{ background: getSourceAccent(source.label) }} /> {source.label}</small>}<small>En Google Drive, configura el archivo como “Cualquier persona con el enlace”.</small></div>
               <div className="thumbnail-config">
-                <div className="form-group"><label>Miniatura personalizada <span>(opcional)</span></label><div className="url-input"><ImageIcon size={18} /><input value={draft.thumbnailUrl} onChange={(event) => setDraft({ ...draft, thumbnailUrl: event.target.value })} placeholder="Se obtiene automáticamente; pega una imagen solo si quieres reemplazarla" maxLength="2048" /></div><small>YouTube, Drive, Vimeo y Loom generan su imagen automáticamente. Los MP4 muestran su primer fotograma.</small></div>
+                <div className="form-group"><label>Miniatura personalizada <span>(opcional)</span></label><div className="url-input"><ImageIcon size={18} /><input value={draft.thumbnailUrl} onChange={(event) => setDraft({ ...draft, thumbnailUrl: event.target.value })} placeholder="Se obtiene automáticamente; pega una imagen solo si quieres reemplazarla" maxLength="2048" /></div><small>YouTube, Drive, Vimeo y Loom generan su imagen automáticamente. Los archivos directos muestran el fotograma del segundo 3.</small></div>
                 <div className="thumbnail-preview"><VideoThumbnail video={{ title: draft.title || 'Vista previa', url: draft.url, thumbnailUrl: draft.thumbnailUrl }} /><span><ImageIcon size={18} /></span><small>VISTA PREVIA</small></div>
               </div>
               <div className="form-row"><div className="form-group"><label>Duración (opcional)</label><input value={draft.duration} onChange={(event) => setDraft({ ...draft, duration: event.target.value })} placeholder="Ej. 05:30" maxLength="20" /></div><label className="feature-check"><input type="checkbox" checked={draft.featured} onChange={(event) => setDraft({ ...draft, featured: event.target.checked })} /><span><Sparkles size={16} /></span><div><strong>Video destacado</strong><small>Aparecerá primero en el inicio</small></div></label></div>
@@ -1473,6 +1503,9 @@ function VideoPlayerPage({ video, role, data, onBack, onPlay }) {
     return <div className="player-page"><button className="back-button" onClick={onBack}><ArrowLeft size={17} /> Volver a la biblioteca</button><div className="player-blocked-state"><span><LockKeyhole size={28} /></span><h2>Este video está bloqueado</h2><p>El administrador no ha habilitado su reproducción para tu rol.</p></div></div>
   }
   const source = getVideoSource(video.url)
+  const frameClassName = source.provider === 'google_drive'
+    ? 'video-frame video-frame--google-drive'
+    : 'video-frame'
   const section = data.sections.find((item) => item.id === video.assignments[role])
   const related = data.videos.filter((item) => item.id !== video.id && item.assignments[role] === video.assignments[role] && !isVideoLockedFor(item, role)).slice(0, 3)
   return (
@@ -1480,7 +1513,7 @@ function VideoPlayerPage({ video, role, data, onBack, onPlay }) {
       <button className="back-button" onClick={onBack}><ArrowLeft size={17} /> Volver a la biblioteca</button>
       <div className="player-layout">
         <div>
-          <div className="video-frame">
+          <div className={frameClassName}>
             {source.type === 'video' ? <video src={source.embedUrl} controls playsInline /> : source.type === 'iframe' ? <iframe src={source.embedUrl} title={video.title} referrerPolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen /> : <div className="video-error"><Film size={32} /><p>No se pudo cargar este enlace.</p></div>}
           </div>
           <div className="player-copy"><div className="player-meta"><span>{section?.name || 'Video'}</span><span><i style={{ background: getSourceAccent(source.label) }} />{source.label}</span><span><Clock3 size={14} /> {video.duration}</span></div><h1>{video.title}</h1><p>{video.description}</p></div>
