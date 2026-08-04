@@ -1,3 +1,32 @@
+export const VIDEO_THUMBNAIL_SECOND = 3
+
+export function getThumbnailSeekTime(duration, targetSecond = VIDEO_THUMBNAIL_SECOND) {
+  const safeTarget = Number.isFinite(targetSecond) && targetSecond >= 0
+    ? targetSecond
+    : VIDEO_THUMBNAIL_SECOND
+
+  if (!Number.isFinite(duration) || duration <= 0) return safeTarget
+
+  return Math.min(safeTarget, Math.max(0, duration - 0.05))
+}
+
+export function getVideoThumbnailUrl(rawUrl = '', targetSecond = VIDEO_THUMBNAIL_SECOND) {
+  const value = rawUrl.trim()
+  if (!value) return ''
+
+  const safeTarget = Number.isFinite(targetSecond) && targetSecond >= 0
+    ? targetSecond
+    : VIDEO_THUMBNAIL_SECOND
+
+  try {
+    const url = new URL(value)
+    url.hash = `t=${safeTarget}`
+    return url.toString()
+  } catch {
+    return value
+  }
+}
+
 export function getVideoSource(rawUrl = '') {
   const value = rawUrl.trim()
   if (!value) return { type: 'empty', embedUrl: '', label: 'Sin enlace' }
