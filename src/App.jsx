@@ -6,7 +6,6 @@ import {
   BookOpen,
   BriefcaseBusiness,
   Check,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronsUpDown,
@@ -18,6 +17,7 @@ import {
   Film,
   FolderCog,
   Home,
+  ImageIcon,
   KeyRound,
   Layers3,
   LayoutDashboard,
@@ -42,7 +42,7 @@ import {
   X,
 } from 'lucide-react'
 import { createDefaultData, DEFAULT_CODES, ROLE_META } from './data'
-import { getSourceAccent, getVideoSource } from './videoUtils'
+import { getSourceAccent, getVideoSource, resolveVideoThumbnail } from './videoUtils'
 
 const STORAGE_KEY = 'aurea-video-hub-data-v1'
 const THEME_KEY = 'aurea-video-hub-theme'
@@ -68,10 +68,58 @@ const SECTION_ICON_OPTIONS = [
   { value: 'lightbulb', label: 'Ideas' },
 ]
 
+const VIEWER_ROLES = ['operator', 'boss']
+
+const AUDIENCE_META = {
+  operator: { label: 'Operante', groupLabel: 'Operante', description: 'Videos exclusivos para el rol Operante' },
+  boss: { label: 'Jefe', groupLabel: 'Jefe', description: 'Videos exclusivos para el rol Jefe' },
+  both: { label: 'Ambos', groupLabel: 'Todos', description: 'Videos destinados a Operante y Jefe' },
+  none: { label: 'Sin asignar', groupLabel: 'Sin asignar', description: 'Videos que necesitan una audiencia y una sección' },
+}
+
+const isVideoAssignedTo = (video, role) => Boolean(video.assignments?.[role])
+const isVideoLockedFor = (video, role) => isVideoAssignedTo(video, role) && Boolean(video.locked?.[role])
+
+function getVideoAudience(video) {
+  const forOperator = isVideoAssignedTo(video, 'operator')
+  const forBoss = isVideoAssignedTo(video, 'boss')
+  if (forOperator && forBoss) return 'both'
+  if (forOperator) return 'operator'
+  if (forBoss) return 'boss'
+  return 'none'
+}
+
 function readData() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
-    return saved ? JSON.parse(saved) : createDefaultData()
+    if (!saved) return createDefaultData()
+
+    const parsed = JSON.parse(saved)
+    const updatedDemoUrls = {
+      'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4': 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4',
+      'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4': 'https://www.w3schools.com/html/mov_bbb.mp4',
+      'https://vimeo.com/76979871': 'https://vimeo.com/863362136',
+    }
+
+    return {
+      ...parsed,
+      organization: parsed.organization === 'Aurea' ? 'Almacén de Remates' : parsed.organization,
+      videos: (parsed.videos || []).map((video) => {
+        const assignments = video.assignments || {}
+        const locked = Object.fromEntries(
+          VIEWER_ROLES
+            .filter((role) => assignments[role])
+            .map((role) => [role, Boolean(video.locked?.[role])]),
+        )
+
+        return {
+          ...video,
+          assignments,
+          locked,
+          url: updatedDemoUrls[video.url] || video.url,
+        }
+      }),
+    }
   } catch {
     return createDefaultData()
   }
@@ -128,15 +176,15 @@ function App() {
   )
 }
 
-function Brand({ compact = false, name = 'Aurea' }) {
+function CompanyLogo({ compact = false }) {
   return (
-    <div className={`brand ${compact ? 'brand--compact' : ''}`}>
-      <span className="brand__mark" aria-hidden="true">
-        <span className="brand__play" />
+    <div className={`company-brand ${compact ? 'company-brand--compact' : ''}`}>
+      <span className="company-brand__plate">
+        <img src="/brand/almacen-remates-web.png" alt="Almacén de Remates" />
       </span>
       {!compact && (
-        <span className="brand__words">
-          <strong>{name}</strong>
+        <span className="company-brand__product">
+          <strong>PORTAL PRIVADO</strong>
           <small>VIDEO HUB</small>
         </span>
       )}
@@ -153,12 +201,61 @@ function ThemeToggle({ theme, onToggle, label = true }) {
   )
 }
 
+function VideoThumbnail({ video, className = '' }) {
+  const source = getVideoSource(video?.url || '')
+  const preferredThumbnail = video?.thumbnailUrl?.trim() || source.thumbnailUrl || ''
+  const [thumbnailUrl, setThumbnailUrl] = useState(preferredThumbnail)
+  const [videoFailed, setVideoFailed] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    setThumbnailUrl(preferredThumbnail)
+    setVideoFailed(false)
+
+    if (!preferredThumbnail && source.provider === 'vimeo') {
+      resolveVideoThumbnail(video.url).then((url) => {
+        if (active) setThumbnailUrl(url)
+      })
+    }
+
+    return () => { active = false }
+  }, [preferredThumbnail, source.provider, video?.url])
+
+  if (thumbnailUrl) {
+    return (
+      <img
+        className={`video-thumbnail-media ${className}`}
+        src={thumbnailUrl}
+        alt={`Miniatura de ${video.title || 'video'}`}
+        loading="lazy"
+        onError={() => setThumbnailUrl('')}
+      />
+    )
+  }
+
+  if (source.type === 'video' && !videoFailed) {
+    const frameUrl = source.embedUrl.includes('#') ? source.embedUrl : `${source.embedUrl}#t=0.1`
+    return (
+      <video
+        className={`video-thumbnail-media ${className}`}
+        src={frameUrl}
+        preload="metadata"
+        muted
+        playsInline
+        aria-label={`Miniatura de ${video.title || 'video'}`}
+        onError={() => setVideoFailed(true)}
+      />
+    )
+  }
+
+  return null
+}
+
 function LoginScreen({ data, theme, toggleTheme, onLogin }) {
   const [code, setCode] = useState('')
   const [showCode, setShowCode] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [showDemo, setShowDemo] = useState(false)
 
   const submit = (event) => {
     event.preventDefault()
@@ -184,7 +281,7 @@ function LoginScreen({ data, theme, toggleTheme, onLogin }) {
       <div className="login-grid" aria-hidden="true" />
 
       <header className="login-header">
-        <Brand name={data.organization} />
+        <CompanyLogo />
         <ThemeToggle theme={theme} onToggle={toggleTheme} label={false} />
       </header>
 
@@ -236,20 +333,6 @@ function LoginScreen({ data, theme, toggleTheme, onLogin }) {
 
             <div className="secure-note"><ShieldCheck size={15} /> Acceso seguro y contenido protegido</div>
 
-            <div className="demo-access">
-              <button type="button" onClick={() => setShowDemo((value) => !value)}>
-                <CircleHelp size={15} /> Códigos para probar la demo <ChevronDown size={15} className={showDemo ? 'rotate' : ''} />
-              </button>
-              {showDemo && (
-                <div className="demo-access__codes">
-                  {Object.entries(data.codes).map(([role, value]) => (
-                    <button key={role} type="button" onClick={() => setCode(value)}>
-                      <span>{ROLE_META[role].label}</span><code>{value}</code>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
           </div>
         </div>
       </section>
@@ -280,10 +363,11 @@ function AdminApp({ data, setData, theme, toggleTheme, onLogout }) {
     setData((current) => ({
       ...current,
       sections: current.sections.filter((section) => section.id !== sectionId),
-      videos: current.videos.map((video) => ({
-        ...video,
-        assignments: Object.fromEntries(Object.entries(video.assignments).filter(([, value]) => value !== sectionId)),
-      })),
+      videos: current.videos.map((video) => {
+        const assignments = Object.fromEntries(Object.entries(video.assignments).filter(([, value]) => value !== sectionId))
+        const locked = Object.fromEntries(Object.entries(video.locked || {}).filter(([role]) => assignments[role]))
+        return { ...video, assignments, locked }
+      }),
     }))
   }
 
@@ -300,7 +384,7 @@ function AdminApp({ data, setData, theme, toggleTheme, onLogout }) {
       <button className={`mobile-overlay ${menuOpen ? 'is-visible' : ''}`} onClick={() => setMenuOpen(false)} aria-label="Cerrar menú" />
       <aside className={`sidebar admin-sidebar ${menuOpen ? 'is-open' : ''}`}>
         <div className="sidebar__top">
-          <Brand name={data.organization} />
+          <CompanyLogo compact />
           <button className="sidebar-close" onClick={() => setMenuOpen(false)}><X size={20} /></button>
         </div>
         <div className="role-pill"><span>AD</span><div><strong>Administrador</strong><small>Control total</small></div></div>
@@ -351,11 +435,13 @@ function AdminOverview({ data, onNavigate }) {
   const bossSections = visibleSectionIds('boss')
   const operatorVideos = data.videos.filter((video) => operatorSections.has(video.assignments.operator)).length
   const bossVideos = data.videos.filter((video) => bossSections.has(video.assignments.boss)).length
+  const operatorBlocked = data.videos.filter((video) => operatorSections.has(video.assignments.operator) && isVideoLockedFor(video, 'operator')).length
+  const bossBlocked = data.videos.filter((video) => bossSections.has(video.assignments.boss) && isVideoLockedFor(video, 'boss')).length
   const stats = [
     { label: 'Videos publicados', value: data.videos.length, note: 'en la biblioteca', icon: Play, tone: 'gold' },
     { label: 'Secciones activas', value: data.sections.length, note: 'entre ambos roles', icon: Layers3, tone: 'blue' },
-    { label: 'Para operante', value: operatorVideos, note: 'videos autorizados', icon: UsersRound, tone: 'green' },
-    { label: 'Para jefe', value: bossVideos, note: 'videos autorizados', icon: BriefcaseBusiness, tone: 'violet' },
+    { label: 'Para operante', value: operatorVideos, note: `${operatorVideos - operatorBlocked} disponibles · ${operatorBlocked} bloqueados`, icon: UsersRound, tone: 'green' },
+    { label: 'Para jefe', value: bossVideos, note: `${bossVideos - bossBlocked} disponibles · ${bossBlocked} bloqueados`, icon: BriefcaseBusiness, tone: 'violet' },
   ]
 
   return (
@@ -375,7 +461,7 @@ function AdminOverview({ data, onNavigate }) {
               const source = getVideoSource(video.url)
               return (
                 <div className="recent-row" key={video.id}>
-                  <div className="mini-thumbnail"><Play size={16} fill="currentColor" /></div>
+                  <div className="mini-thumbnail"><VideoThumbnail video={video} /><Play size={16} fill="currentColor" /></div>
                   <div className="recent-row__copy"><strong>{video.title}</strong><small><span style={{ color: getSourceAccent(source.label) }}>{source.label}</span> · {Object.keys(video.assignments).map((role) => ROLE_META[role].label).join(', ')}</small></div>
                   <span className="status-badge">Publicado</span>
                 </div>
@@ -491,7 +577,20 @@ function SectionsManager({ data, setData, onRemove }) {
   )
 }
 
-const emptyVideoDraft = { title: '', description: '', url: '', duration: '', featured: false, operatorEnabled: true, operatorSection: '', bossEnabled: false, bossSection: '' }
+const emptyVideoDraft = {
+  title: '',
+  description: '',
+  url: '',
+  thumbnailUrl: '',
+  duration: '',
+  featured: false,
+  operatorEnabled: true,
+  operatorSection: '',
+  operatorLocked: false,
+  bossEnabled: false,
+  bossSection: '',
+  bossLocked: false,
+}
 
 function VideosManager({ data, setData }) {
   const [formOpen, setFormOpen] = useState(false)
@@ -516,12 +615,15 @@ function VideosManager({ data, setData }) {
       title: video.title,
       description: video.description,
       url: video.url,
+      thumbnailUrl: video.thumbnailUrl || '',
       duration: video.duration || '',
       featured: Boolean(video.featured),
       operatorEnabled: Boolean(video.assignments.operator),
       operatorSection: video.assignments.operator || sectionsFor('operator')[0]?.id || '',
+      operatorLocked: Boolean(video.locked?.operator),
       bossEnabled: Boolean(video.assignments.boss),
       bossSection: video.assignments.boss || sectionsFor('boss')[0]?.id || '',
+      bossLocked: Boolean(video.locked?.boss),
     })
     setFormOpen(true)
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -541,13 +643,18 @@ function VideosManager({ data, setData }) {
     const assignments = {}
     if (draft.operatorEnabled && draft.operatorSection) assignments.operator = draft.operatorSection
     if (draft.bossEnabled && draft.bossSection) assignments.boss = draft.bossSection
+    const locked = {}
+    if (draft.operatorEnabled && draft.operatorSection) locked.operator = draft.operatorLocked
+    if (draft.bossEnabled && draft.bossSection) locked.boss = draft.bossLocked
     const payload = {
       title: draft.title.trim(),
       description: draft.description.trim(),
       url: draft.url.trim(),
+      thumbnailUrl: draft.thumbnailUrl.trim(),
       duration: draft.duration.trim() || 'Video',
       featured: draft.featured,
       assignments,
+      locked,
     }
     setData((current) => editingId
       ? { ...current, videos: current.videos.map((video) => video.id === editingId ? { ...video, ...payload } : video) }
@@ -560,6 +667,14 @@ function VideosManager({ data, setData }) {
   const deleteVideo = (id) => setData((current) => ({ ...current, videos: current.videos.filter((video) => video.id !== id) }))
   const source = getVideoSource(draft.url)
   const filtered = data.videos.filter((video) => video.title.toLowerCase().includes(query.toLowerCase()))
+  const groupOrder = ['operator', 'boss', 'both']
+  if (filtered.some((video) => getVideoAudience(video) === 'none')) groupOrder.push('none')
+  const libraryGroups = groupOrder.map((audience) => ({
+    id: audience,
+    ...AUDIENCE_META[audience],
+    videos: filtered.filter((video) => getVideoAudience(video) === audience),
+  }))
+  const visibleLibraryGroups = query.trim() ? libraryGroups.filter((group) => group.videos.length) : libraryGroups
 
   return (
     <div className="manager-stack">
@@ -571,6 +686,10 @@ function VideosManager({ data, setData }) {
               <div className="form-group"><label>Título del video</label><input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Ej. Procedimiento de apertura" /></div>
               <div className="form-group"><label>Descripción</label><textarea value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="Explica brevemente qué aprenderá la persona…" rows="4" /></div>
               <div className="form-group"><label>Enlace del video</label><div className="url-input"><UploadCloud size={18} /><input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="Pega un enlace de YouTube, Google Drive, Vimeo o MP4" /></div>{draft.url && <small className={`source-detection source-detection--${source.type}`}><i style={{ background: getSourceAccent(source.label) }} /> {source.label}</small>}<small>En Google Drive, configura el archivo como “Cualquier persona con el enlace”.</small></div>
+              <div className="thumbnail-config">
+                <div className="form-group"><label>Miniatura personalizada <span>(opcional)</span></label><div className="url-input"><ImageIcon size={18} /><input value={draft.thumbnailUrl} onChange={(event) => setDraft({ ...draft, thumbnailUrl: event.target.value })} placeholder="Se obtiene automáticamente; pega una imagen solo si quieres reemplazarla" /></div><small>YouTube, Drive, Vimeo y Loom generan su imagen automáticamente. Los MP4 muestran su primer fotograma.</small></div>
+                <div className="thumbnail-preview"><VideoThumbnail video={{ title: draft.title || 'Vista previa', url: draft.url, thumbnailUrl: draft.thumbnailUrl }} /><span><ImageIcon size={18} /></span><small>VISTA PREVIA</small></div>
+              </div>
               <div className="form-row"><div className="form-group"><label>Duración (opcional)</label><input value={draft.duration} onChange={(event) => setDraft({ ...draft, duration: event.target.value })} placeholder="Ej. 05:30" /></div><label className="feature-check"><input type="checkbox" checked={draft.featured} onChange={(event) => setDraft({ ...draft, featured: event.target.checked })} /><span><Sparkles size={16} /></span><div><strong>Video destacado</strong><small>Aparecerá primero en el inicio</small></div></label></div>
             </div>
             <div className="assignment-box">
@@ -578,11 +697,12 @@ function VideosManager({ data, setData }) {
               {['operator', 'boss'].map((role) => {
                 const enabledKey = role === 'operator' ? 'operatorEnabled' : 'bossEnabled'
                 const sectionKey = role === 'operator' ? 'operatorSection' : 'bossSection'
+                const lockedKey = role === 'operator' ? 'operatorLocked' : 'bossLocked'
                 const enabled = draft[enabledKey]
                 return (
                   <div className={`assignment-card ${enabled ? 'enabled' : ''}`} key={role}>
                     <label className="switch-line"><span className="role-avatar">{ROLE_META[role].short}</span><div><strong>{ROLE_META[role].label}</strong><small>{enabled ? 'Puede ver este video' : 'Sin acceso'}</small></div><input type="checkbox" checked={enabled} onChange={(event) => setDraft({ ...draft, [enabledKey]: event.target.checked })} /><i /></label>
-                    {enabled && <div className="form-group"><label>Mostrar en la sección</label><select value={draft[sectionKey]} onChange={(event) => setDraft({ ...draft, [sectionKey]: event.target.value })}><option value="">Seleccionar…</option>{sectionsFor(role).map((section) => <option value={section.id} key={section.id}>{section.name}</option>)}</select></div>}
+                    {enabled && <><div className="form-group"><label>Mostrar en la sección</label><select value={draft[sectionKey]} onChange={(event) => setDraft({ ...draft, [sectionKey]: event.target.value })}><option value="">Seleccionar…</option>{sectionsFor(role).map((section) => <option value={section.id} key={section.id}>{section.name}</option>)}</select></div><label className={`role-lock-toggle ${draft[lockedKey] ? 'is-locked' : ''}`}><input type="checkbox" checked={draft[lockedKey]} onChange={(event) => setDraft({ ...draft, [lockedKey]: event.target.checked })} /><span><LockKeyhole size={15} /></span><div><strong>Mostrar como bloqueado</strong><small>Verá la tarjeta, pero no podrá reproducir el video.</small></div><i /></label></>}
                   </div>
                 )
               })}
@@ -595,12 +715,21 @@ function VideosManager({ data, setData }) {
 
       <section className="panel manager-panel">
         <div className="manager-toolbar">
-          <div><h2>Todos los videos</h2><p>{data.videos.length} contenidos publicados</p></div>
+          <div><h2>Biblioteca organizada</h2><p>{data.videos.length} contenidos clasificados por audiencia</p></div>
           <div className="toolbar-actions"><label className="search-field"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar video…" /></label><button className="primary-button" onClick={openNew}><Plus size={17} /> Agregar video</button></div>
         </div>
-        <div className="video-admin-grid">
-          {filtered.map((video) => <AdminVideoCard video={video} data={data} onEdit={() => openEdit(video)} onDelete={() => deleteVideo(video.id)} key={video.id} />)}
-          {!filtered.length && <EmptyState icon={Film} title="No encontramos videos" text={query ? 'Prueba con otra búsqueda.' : 'Agrega el primer video de la biblioteca.'} />}
+        <div className="video-library-groups">
+          {visibleLibraryGroups.map((group) => (
+            <section className={`video-role-group video-role-group--${group.id}`} key={group.id}>
+              <header className="video-role-group__header">
+                <div className="video-role-group__title"><span>{group.id === 'both' ? <UsersRound size={16} /> : group.id === 'none' ? <MoreHorizontal size={16} /> : ROLE_META[group.id].short}</span><div><h3>{group.groupLabel}</h3><small>{group.description}</small></div></div>
+                <span className="video-role-group__count">{group.videos.length} {group.videos.length === 1 ? 'video' : 'videos'}</span>
+                <i className="video-role-group__rule" />
+              </header>
+              {group.videos.length ? <div className="video-admin-grid video-admin-grid--group">{group.videos.map((video) => <AdminVideoCard video={video} data={data} onEdit={() => openEdit(video)} onDelete={() => deleteVideo(video.id)} key={video.id} />)}</div> : <div className="video-role-group__empty"><Film size={17} /><span>Aún no hay videos en este grupo.</span></div>}
+            </section>
+          ))}
+          {!filtered.length && query && <EmptyState icon={Search} title="No encontramos videos" text="Prueba con otra búsqueda." />}
         </div>
       </section>
     </div>
@@ -609,15 +738,21 @@ function VideosManager({ data, setData }) {
 
 function AdminVideoCard({ video, data, onEdit, onDelete }) {
   const source = getVideoSource(video.url)
+  const audience = getVideoAudience(video)
+  const audienceMeta = AUDIENCE_META[audience]
+  const lockedRoles = VIEWER_ROLES.filter((role) => isVideoLockedFor(video, role))
   const getSection = (id) => data.sections.find((section) => section.id === id)?.name || 'Sin sección'
   return (
     <article className="admin-video-card">
       <div className="admin-video-card__visual">
+        <VideoThumbnail video={video} />
         <span className="source-badge"><i style={{ background: getSourceAccent(source.label) }} /> {source.label}</span>
+        <span className={`audience-badge audience-badge--${audience}`}><UsersRound size={11} /> {audienceMeta.label}</span>
         <span className="play-orb"><Play size={20} fill="currentColor" /></span>
+        {!!lockedRoles.length && <span className="role-lock-statuses">{lockedRoles.map((role) => <span className="role-lock-status" key={role}><LockKeyhole size={9} /> {ROLE_META[role].short} bloqueado</span>)}</span>}
         <small>{video.duration}</small>
       </div>
-      <div className="admin-video-card__body"><div className="card-title-row"><h3>{video.title}</h3>{video.featured && <Sparkles size={15} />}</div><p>{video.description}</p><div className="assignment-tags">{Object.entries(video.assignments).map(([role, sectionId]) => <span key={role}><b>{ROLE_META[role].short}</b>{getSection(sectionId)}</span>)}</div></div>
+      <div className="admin-video-card__body"><div className="card-title-row"><h3>{video.title}</h3>{video.featured && <Sparkles size={15} />}</div><p>{video.description}</p><div className="assignment-tags">{Object.entries(video.assignments).map(([role, sectionId]) => <span className={isVideoLockedFor(video, role) ? 'is-locked' : ''} key={role}><b>{ROLE_META[role].short}</b>{getSection(sectionId)}{isVideoLockedFor(video, role) && <LockKeyhole size={10} />}</span>)}</div></div>
       <div className="admin-video-card__actions"><button onClick={onEdit}><Pencil size={15} /> Editar</button><button className="danger" onClick={onDelete}><Trash2 size={15} /></button></div>
     </article>
   )
@@ -670,31 +805,104 @@ function AccessManager({ data, setData }) {
 
 function RolePreview({ data }) {
   const [role, setRole] = useState('operator')
-  const sections = [...data.sections].filter((section) => section.roles.includes(role)).sort((a, b) => a.order - b.order)
+  const [activeSection, setActiveSection] = useState('home')
+  const [selectedVideo, setSelectedVideo] = useState(null)
+  const [query, setQuery] = useState('')
+  const [navOpen, setNavOpen] = useState(false)
+  const sections = useMemo(() => [...data.sections].filter((section) => section.roles.includes(role)).sort((a, b) => a.order - b.order), [data.sections, role])
   const visibleSectionIds = new Set(sections.map((section) => section.id))
   const videos = data.videos.filter((video) => visibleSectionIds.has(video.assignments[role]))
+  const blockedVideos = videos.filter((video) => isVideoLockedFor(video, role))
+  const availableVideos = videos.filter((video) => !isVideoLockedFor(video, role))
+  const activeSectionData = sections.find((section) => section.id === activeSection)
+  const featured = availableVideos.find((video) => video.featured) || availableVideos[0]
+  const filtered = videos.filter((video) => {
+    const belongs = activeSection === 'home' || video.assignments[role] === activeSection
+    const matches = `${video.title} ${video.description}`.toLowerCase().includes(query.toLowerCase())
+    return belongs && matches
+  })
+
+  const resetPreview = () => {
+    setActiveSection('home')
+    setSelectedVideo(null)
+    setQuery('')
+    setNavOpen(false)
+  }
+
+  const switchRole = (nextRole) => {
+    setRole(nextRole)
+    resetPreview()
+  }
+
+  const navigate = (sectionId) => {
+    setActiveSection(sectionId)
+    setSelectedVideo(null)
+    setNavOpen(false)
+  }
+
+  const openVideo = (video) => {
+    if (!video || isVideoLockedFor(video, role)) return
+    setSelectedVideo(video)
+  }
+
   return (
     <div className="manager-stack">
-      <section className="preview-switcher"><div><span>Visualizando como</span><strong>{ROLE_META[role].label}</strong></div><div>{['operator', 'boss'].map((item) => <button className={item === role ? 'active' : ''} onClick={() => setRole(item)} key={item}>{ROLE_META[item].short} {ROLE_META[item].label}</button>)}</div></section>
-      <section className="panel preview-panel">
-        <aside className="preview-sidebar"><Brand name={data.organization} /><span>INICIO</span>{sections.map((section) => { const Icon = ICONS[section.icon] || Layers3; return <div key={section.id}><Icon size={16} /> {section.name}</div> })}</aside>
-        <div className="preview-content"><span className="eyebrow eyebrow--plain">VISTA PREVIA</span><h2>Hola, {ROLE_META[role].label}</h2><p>Esto es lo que este perfil puede encontrar al iniciar sesión.</p><div className="preview-stat"><span><Play size={18} /></span><div><strong>{videos.length} videos habilitados</strong><small>en {sections.length} secciones visibles</small></div></div><div className="preview-list">{videos.slice(0, 3).map((video) => <div key={video.id}><span><Play size={13} fill="currentColor" /></span><div><strong>{video.title}</strong><small>{sections.find((section) => section.id === video.assignments[role])?.name}</small></div></div>)}</div></div>
+      <section className="preview-switcher"><div><span>Visualizando como</span><strong>{ROLE_META[role].label} · {availableVideos.length} disponibles · {blockedVideos.length} bloqueados</strong></div><div>{['operator', 'boss'].map((item) => <button className={item === role ? 'active' : ''} onClick={() => switchRole(item)} key={item}>{ROLE_META[item].short} {ROLE_META[item].label}</button>)}</div></section>
+      <section className="panel role-preview-frame">
+        <header className="role-preview-chrome"><div aria-hidden="true"><i /><i /><i /></div><span><Eye size={13} /> Vista interactiva: navega como lo haría este rol</span><button type="button" onClick={resetPreview}><Home size={14} /> Reiniciar vista</button></header>
+        <div className="role-preview-app">
+          <button className={`role-preview-overlay ${navOpen ? 'is-visible' : ''}`} onClick={() => setNavOpen(false)} aria-label="Cerrar menú de la vista previa" />
+          <aside className={`role-preview-sidebar ${navOpen ? 'is-open' : ''}`}>
+            <div className="role-preview-brand"><CompanyLogo compact /></div>
+            <nav className="sidebar-nav viewer-nav">
+              <small className="sidebar-label">EXPLORAR</small>
+              <button className={activeSection === 'home' ? 'active' : ''} onClick={() => navigate('home')}><Home size={18} /><span>Inicio</span></button>
+              <small className="sidebar-label sidebar-label--spaced">MI CONTENIDO</small>
+              {sections.map((section) => { const Icon = ICONS[section.icon] || Layers3; return <button className={activeSection === section.id ? 'active' : ''} onClick={() => navigate(section.id)} key={section.id}><Icon size={18} /><span>{section.name}</span><small>{videos.filter((video) => video.assignments[role] === section.id).length}</small></button> })}
+            </nav>
+            <div className="sidebar-help"><span><CircleHelp size={16} /></span><div><strong>¿Necesitas ayuda?</strong><small>Contacta a tu administrador</small></div></div>
+            <div className="role-preview-sidebar-foot"><Eye size={15} /> Vista simulada</div>
+          </aside>
+
+          <section className="role-preview-main">
+            <header className="role-preview-topbar">
+              <button className="role-preview-menu" onClick={() => setNavOpen(true)} aria-label="Abrir menú de la vista previa"><Menu size={19} /></button>
+              <label className="global-search"><Search size={17} /><input value={query} onChange={(event) => { setQuery(event.target.value); setSelectedVideo(null) }} placeholder="Buscar en tus videos…" /></label>
+              <div className="viewer-profile"><div><span>Bienvenido</span><strong>{ROLE_META[role].label}</strong></div><span className="role-avatar">{ROLE_META[role].short}</span></div>
+            </header>
+            <main className="role-preview-content">
+              {selectedVideo ? (
+                <VideoPlayerPage video={selectedVideo} role={role} data={data} onBack={() => setSelectedVideo(null)} onPlay={openVideo} />
+              ) : activeSection === 'home' && !query ? (
+                <ViewerHome role={role} videos={videos} sections={sections} featured={featured} lockedCount={blockedVideos.length} onPlay={openVideo} onSection={navigate} />
+              ) : (
+                <VideoListing role={role} title={activeSection === 'home' ? 'Resultados de búsqueda' : activeSectionData?.name || 'Videos'} subtitle={query ? `Resultados para “${query}”` : 'Contenido seleccionado para este perfil'} videos={filtered} onPlay={openVideo} />
+              )}
+            </main>
+          </section>
+        </div>
       </section>
-      <div className="info-callout"><Eye size={19} /><div><strong>Vista protegida</strong><p>Los títulos, descripciones y enlaces de los videos no autorizados no se muestran a este rol.</p></div></div>
+      <div className="info-callout"><Eye size={19} /><div><strong>Simulación fiel y segura</strong><p>Puedes usar el menú, el buscador, las categorías y los videos. Esta simulación no modifica permisos ni datos; solo reproduce la experiencia del rol seleccionado.</p></div></div>
     </div>
   )
 }
 
 function ViewerApp({ role, data, theme, toggleTheme, onLogout }) {
   const sections = useMemo(() => [...data.sections].filter((section) => section.roles.includes(role)).sort((a, b) => a.order - b.order), [data.sections, role])
-  const allowedVideos = useMemo(() => {
+  const targetedVideos = useMemo(() => {
     const visibleSectionIds = new Set(sections.map((section) => section.id))
     return data.videos.filter((video) => visibleSectionIds.has(video.assignments[role]))
   }, [data.videos, role, sections])
+  const playableVideos = useMemo(() => targetedVideos.filter((video) => !isVideoLockedFor(video, role)), [role, targetedVideos])
   const [activeSection, setActiveSection] = useState('home')
   const [selectedVideo, setSelectedVideo] = useState(null)
   const [query, setQuery] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
+
+  const openVideo = (video) => {
+    if (!video || isVideoLockedFor(video, role)) return
+    setSelectedVideo(video)
+  }
 
   const navigate = (sectionId) => {
     setActiveSection(sectionId)
@@ -702,26 +910,26 @@ function ViewerApp({ role, data, theme, toggleTheme, onLogout }) {
     setMenuOpen(false)
   }
 
-  const filtered = allowedVideos.filter((video) => {
+  const filtered = targetedVideos.filter((video) => {
     const belongs = activeSection === 'home' || video.assignments[role] === activeSection
     const matches = `${video.title} ${video.description}`.toLowerCase().includes(query.toLowerCase())
     return belongs && matches
   })
 
   const activeSectionData = sections.find((section) => section.id === activeSection)
-  const featured = allowedVideos.find((video) => video.featured) || allowedVideos[0]
-  const lockedCount = Math.max(0, data.videos.length - allowedVideos.length)
+  const featured = playableVideos.find((video) => video.featured) || playableVideos[0]
+  const lockedCount = targetedVideos.filter((video) => isVideoLockedFor(video, role)).length
 
   return (
     <div className="app-layout viewer-layout">
       <button className={`mobile-overlay ${menuOpen ? 'is-visible' : ''}`} onClick={() => setMenuOpen(false)} aria-label="Cerrar menú" />
       <aside className={`sidebar viewer-sidebar ${menuOpen ? 'is-open' : ''}`}>
-        <div className="sidebar__top"><Brand name={data.organization} /><button className="sidebar-close" onClick={() => setMenuOpen(false)}><X size={20} /></button></div>
+        <div className="sidebar__top"><CompanyLogo compact /><button className="sidebar-close" onClick={() => setMenuOpen(false)}><X size={20} /></button></div>
         <nav className="sidebar-nav viewer-nav">
           <small className="sidebar-label">EXPLORAR</small>
           <button className={activeSection === 'home' ? 'active' : ''} onClick={() => navigate('home')}><Home size={19} /><span>Inicio</span></button>
           <small className="sidebar-label sidebar-label--spaced">MI CONTENIDO</small>
-          {sections.map((section) => { const Icon = ICONS[section.icon] || Layers3; return <button className={activeSection === section.id ? 'active' : ''} onClick={() => navigate(section.id)} key={section.id}><Icon size={19} /><span>{section.name}</span><small>{allowedVideos.filter((video) => video.assignments[role] === section.id).length}</small></button> })}
+          {sections.map((section) => { const Icon = ICONS[section.icon] || Layers3; return <button className={activeSection === section.id ? 'active' : ''} onClick={() => navigate(section.id)} key={section.id}><Icon size={19} /><span>{section.name}</span><small>{targetedVideos.filter((video) => video.assignments[role] === section.id).length}</small></button> })}
         </nav>
         <div className="sidebar-help"><span><CircleHelp size={17} /></span><div><strong>¿Necesitas ayuda?</strong><small>Contacta a tu administrador</small></div></div>
         <div className="sidebar__bottom"><ThemeToggle theme={theme} onToggle={toggleTheme} /><button className="sidebar-action" onClick={onLogout}><LogOut size={18} /><span>Cerrar sesión</span></button></div>
@@ -730,17 +938,17 @@ function ViewerApp({ role, data, theme, toggleTheme, onLogout }) {
       <section className="main-shell viewer-main">
         <header className="topbar viewer-topbar">
           <button className="mobile-menu" onClick={() => setMenuOpen(true)}><Menu size={21} /></button>
-          <label className="global-search"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar en tus videos…" /></label>
+          <label className="global-search"><Search size={18} /><input value={query} onChange={(event) => { setQuery(event.target.value); setSelectedVideo(null) }} placeholder="Buscar en tus videos…" /></label>
           <div className="viewer-profile"><div><span>Bienvenido</span><strong>{ROLE_META[role].label}</strong></div><span className="role-avatar">{ROLE_META[role].short}</span></div>
         </header>
 
         <main className="content-area viewer-content">
           {selectedVideo ? (
-            <VideoPlayerPage video={selectedVideo} role={role} data={data} onBack={() => setSelectedVideo(null)} onPlay={setSelectedVideo} />
+            <VideoPlayerPage video={selectedVideo} role={role} data={data} onBack={() => setSelectedVideo(null)} onPlay={openVideo} />
           ) : activeSection === 'home' && !query ? (
-            <ViewerHome role={role} data={data} videos={allowedVideos} sections={sections} featured={featured} lockedCount={lockedCount} onPlay={setSelectedVideo} onSection={navigate} />
+            <ViewerHome role={role} videos={targetedVideos} sections={sections} featured={featured} lockedCount={lockedCount} onPlay={openVideo} onSection={navigate} />
           ) : (
-            <VideoListing title={activeSection === 'home' ? 'Resultados de búsqueda' : activeSectionData?.name || 'Videos'} subtitle={query ? `Resultados para “${query}”` : 'Contenido seleccionado para tu perfil'} videos={filtered} onPlay={setSelectedVideo} />
+            <VideoListing role={role} title={activeSection === 'home' ? 'Resultados de búsqueda' : activeSectionData?.name || 'Videos'} subtitle={query ? `Resultados para “${query}”` : 'Contenido seleccionado para tu perfil'} videos={filtered} onPlay={openVideo} />
           )}
         </main>
       </section>
@@ -750,49 +958,61 @@ function ViewerApp({ role, data, theme, toggleTheme, onLogout }) {
 
 function ViewerHome({ role, videos, sections, featured, lockedCount, onPlay, onSection }) {
   const recent = [...videos].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+  const availableCount = videos.length - lockedCount
   return (
     <div className="viewer-home">
       <div className="viewer-welcome"><div><span className="eyebrow"><Sparkles size={14} /> TU ESPACIO DE APRENDIZAJE</span><h1>Hola, <em>{ROLE_META[role].label}</em></h1><p>Continúa aprendiendo con el contenido preparado para ti.</p></div><div className="viewer-date"><Clock3 size={17} /><span>Contenido actualizado</span></div></div>
       {featured && (
         <section className="hero-video">
+          <VideoThumbnail video={featured} className="hero-video__media" />
           <div className="hero-video__texture" />
           <div className="hero-video__copy"><span className="featured-label"><Sparkles size={13} /> DESTACADO</span><h2>{featured.title}</h2><p>{featured.description}</p><div><button className="light-button" onClick={() => onPlay(featured)}><Play size={17} fill="currentColor" /> Reproducir ahora</button><span><Clock3 size={15} /> {featured.duration}</span></div></div>
           <button className="hero-video__play" onClick={() => onPlay(featured)} aria-label={`Reproducir ${featured.title}`}><Play size={28} fill="currentColor" /></button>
         </section>
       )}
-      <div className="viewer-section-heading"><div><span className="eyebrow eyebrow--plain">RECIENTES</span><h2>Continúa explorando</h2></div><span>{videos.length} videos disponibles</span></div>
-      <div className="viewer-video-grid">{recent.slice(0, 6).map((video) => <ViewerVideoCard video={video} section={sections.find((item) => item.id === video.assignments[role])} onPlay={() => onPlay(video)} key={video.id} />)}</div>
+      <div className="viewer-section-heading"><div><span className="eyebrow eyebrow--plain">RECIENTES</span><h2>Continúa explorando</h2></div><span>{availableCount} disponibles{lockedCount ? ` · ${lockedCount} bloqueados` : ''}</span></div>
+      <div className="viewer-video-grid">{recent.slice(0, 6).map((video) => <ViewerVideoCard role={role} video={video} section={sections.find((item) => item.id === video.assignments[role])} onPlay={() => onPlay(video)} key={video.id} />)}</div>
       {!videos.length && <EmptyState icon={Film} title="Todavía no hay contenido" text="El administrador aún no ha habilitado videos para tu perfil." />}
       <section className="category-strip"><div className="viewer-section-heading"><div><span className="eyebrow eyebrow--plain">SECCIONES</span><h2>Explora por categoría</h2></div></div><div className="category-grid">{sections.map((section) => { const Icon = ICONS[section.icon] || Layers3; const count = videos.filter((video) => video.assignments[role] === section.id).length; return <button onClick={() => onSection(section.id)} key={section.id}><span><Icon size={20} /></span><div><strong>{section.name}</strong><small>{count} {count === 1 ? 'video' : 'videos'}</small></div><ChevronRight size={17} /></button> })}</div></section>
-      {lockedCount > 0 && <div className="locked-notice"><LockKeyhole size={18} /><div><strong>Contenido administrado de forma privada</strong><p>{lockedCount} {lockedCount === 1 ? 'recurso está restringido' : 'recursos están restringidos'} para tu perfil. Solo el administrador puede modificar tu acceso.</p></div></div>}
+      {lockedCount > 0 && <div className="locked-notice"><LockKeyhole size={18} /><div><strong>Contenido bloqueado por el administrador</strong><p>{lockedCount} {lockedCount === 1 ? 'video aparece bloqueado' : 'videos aparecen bloqueados'} en tu biblioteca. Puedes identificarlos, pero no abrirlos ni reproducirlos.</p></div></div>}
     </div>
   )
 }
 
-function VideoListing({ title, subtitle, videos, onPlay }) {
+function VideoListing({ role, title, subtitle, videos, onPlay }) {
   return (
     <div>
       <div className="listing-heading"><span className="eyebrow eyebrow--plain">BIBLIOTECA</span><h1>{title}</h1><p>{subtitle}</p></div>
-      <div className="viewer-video-grid">{videos.map((video) => <ViewerVideoCard video={video} onPlay={() => onPlay(video)} key={video.id} />)}</div>
+      <div className="viewer-video-grid">{videos.map((video) => <ViewerVideoCard role={role} video={video} onPlay={() => onPlay(video)} key={video.id} />)}</div>
       {!videos.length && <EmptyState icon={Search} title="No hay resultados" text="No encontramos videos con esos criterios." />}
     </div>
   )
 }
 
-function ViewerVideoCard({ video, section, onPlay }) {
-  const source = getVideoSource(video.url)
+function ViewerVideoCard({ role, video, section, onPlay }) {
+  const locked = isVideoLockedFor(video, role)
+  const source = locked ? null : getVideoSource(video.url)
+  const audience = getVideoAudience(video)
+  const audienceMeta = AUDIENCE_META[audience]
+  const handlePlay = (event) => {
+    event.stopPropagation()
+    if (!locked) onPlay()
+  }
   return (
-    <article className="viewer-video-card" onClick={onPlay}>
-      <div className="viewer-video-card__visual"><span className="source-badge"><i style={{ background: getSourceAccent(source.label) }} />{source.label}</span><button aria-label={`Reproducir ${video.title}`}><Play size={19} fill="currentColor" /></button><small>{video.duration}</small></div>
-      <div className="viewer-video-card__body">{section && <span>{section.name}</span>}<h3>{video.title}</h3><p>{video.description}</p><button onClick={onPlay}>Ver video <ArrowRight size={14} /></button></div>
+    <article className={`viewer-video-card ${locked ? 'viewer-video-card--locked' : ''}`} onClick={locked ? undefined : onPlay} aria-disabled={locked}>
+      <div className="viewer-video-card__visual">{!locked && <VideoThumbnail video={video} />}{source && <span className="source-badge"><i style={{ background: getSourceAccent(source.label) }} />{source.label}</span>}<span className={`audience-badge audience-badge--${audience}`}><UsersRound size={11} /> {audienceMeta.label}</span>{locked ? <div className="viewer-video-card__lock"><span><LockKeyhole size={19} /></span><strong>Video bloqueado</strong></div> : <button type="button" onClick={handlePlay} aria-label={`Reproducir ${video.title}`}><Play size={19} fill="currentColor" /></button>}<small>{video.duration}</small></div>
+      <div className="viewer-video-card__body">{section && <span>{section.name}</span>}<h3>{video.title}</h3><p>{locked ? 'El administrador mantiene este contenido bloqueado para tu rol.' : video.description}</p><button type="button" disabled={locked} onClick={handlePlay}>{locked ? <><LockKeyhole size={13} /> Contenido bloqueado</> : <>Ver video <ArrowRight size={14} /></>}</button></div>
     </article>
   )
 }
 
 function VideoPlayerPage({ video, role, data, onBack, onPlay }) {
+  if (!isVideoAssignedTo(video, role) || isVideoLockedFor(video, role)) {
+    return <div className="player-page"><button className="back-button" onClick={onBack}><ArrowLeft size={17} /> Volver a la biblioteca</button><div className="player-blocked-state"><span><LockKeyhole size={28} /></span><h2>Este video está bloqueado</h2><p>El administrador no ha habilitado su reproducción para tu rol.</p></div></div>
+  }
   const source = getVideoSource(video.url)
   const section = data.sections.find((item) => item.id === video.assignments[role])
-  const related = data.videos.filter((item) => item.id !== video.id && item.assignments[role] === video.assignments[role]).slice(0, 3)
+  const related = data.videos.filter((item) => item.id !== video.id && item.assignments[role] === video.assignments[role] && !isVideoLockedFor(item, role)).slice(0, 3)
   return (
     <div className="player-page">
       <button className="back-button" onClick={onBack}><ArrowLeft size={17} /> Volver a la biblioteca</button>

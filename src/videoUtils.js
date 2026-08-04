@@ -8,40 +8,102 @@ export function getVideoSource(rawUrl = '') {
 
     if (host === 'youtu.be') {
       const id = url.pathname.split('/').filter(Boolean)[0]
-      return { type: 'iframe', embedUrl: `https://www.youtube-nocookie.com/embed/${id}`, label: 'YouTube' }
+      return {
+        type: 'iframe',
+        provider: 'youtube',
+        id,
+        embedUrl: `https://www.youtube-nocookie.com/embed/${id}`,
+        thumbnailUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+        label: 'YouTube',
+      }
     }
 
     if (host.includes('youtube.com')) {
       const parts = url.pathname.split('/').filter(Boolean)
       const id = url.searchParams.get('v') || (['embed', 'shorts', 'live'].includes(parts[0]) ? parts[1] : '')
-      if (id) return { type: 'iframe', embedUrl: `https://www.youtube-nocookie.com/embed/${id}`, label: 'YouTube' }
+      if (id) return {
+        type: 'iframe',
+        provider: 'youtube',
+        id,
+        embedUrl: `https://www.youtube-nocookie.com/embed/${id}`,
+        thumbnailUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+        label: 'YouTube',
+      }
     }
 
     if (host.includes('drive.google.com')) {
       const match = url.pathname.match(/\/file\/d\/([^/]+)/) || url.pathname.match(/\/d\/([^/]+)/)
       const id = match?.[1] || url.searchParams.get('id')
-      if (id) return { type: 'iframe', embedUrl: `https://drive.google.com/file/d/${id}/preview`, label: 'Google Drive' }
+      if (id) return {
+        type: 'iframe',
+        provider: 'google_drive',
+        id,
+        embedUrl: `https://drive.google.com/file/d/${id}/preview`,
+        thumbnailUrl: `https://drive.google.com/thumbnail?id=${id}&sz=w1280`,
+        label: 'Google Drive',
+      }
     }
 
     if (host.includes('vimeo.com')) {
       const id = url.pathname.split('/').filter(Boolean).find((part) => /^\d+$/.test(part))
-      if (id) return { type: 'iframe', embedUrl: `https://player.vimeo.com/video/${id}`, label: 'Vimeo' }
+      if (id) return {
+        type: 'iframe',
+        provider: 'vimeo',
+        id,
+        embedUrl: `https://player.vimeo.com/video/${id}`,
+        label: 'Vimeo',
+      }
     }
 
     if (host.includes('loom.com')) {
       const parts = url.pathname.split('/').filter(Boolean)
       const id = parts.at(-1)
-      if (id) return { type: 'iframe', embedUrl: `https://www.loom.com/embed/${id}`, label: 'Loom' }
+      if (id) return {
+        type: 'iframe',
+        provider: 'loom',
+        id,
+        embedUrl: `https://www.loom.com/embed/${id}`,
+        thumbnailUrl: `https://cdn.loom.com/sessions/thumbnails/${id}-with-play.gif`,
+        label: 'Loom',
+      }
     }
 
     if (/\.(mp4|webm|ogg)(\?.*)?$/i.test(value)) {
-      return { type: 'video', embedUrl: value, label: 'Archivo directo' }
+      return { type: 'video', provider: 'direct', embedUrl: value, label: 'Archivo directo' }
     }
 
     return { type: 'iframe', embedUrl: value, label: 'Sitio externo' }
   } catch {
     return { type: 'invalid', embedUrl: '', label: 'Enlace no válido' }
   }
+}
+
+const remoteThumbnailCache = new Map()
+
+export async function resolveVideoThumbnail(rawUrl = '') {
+  const source = getVideoSource(rawUrl)
+  if (source.thumbnailUrl) return source.thumbnailUrl
+
+  if (source.provider === 'vimeo') {
+    if (remoteThumbnailCache.has(rawUrl)) return remoteThumbnailCache.get(rawUrl)
+
+    const request = (async () => {
+      try {
+        const endpoint = `https://vimeo.com/api/oembed.json?url=${encodeURIComponent(rawUrl)}`
+        const response = await fetch(endpoint)
+        if (!response.ok) return ''
+        const data = await response.json()
+        return data.thumbnail_url || ''
+      } catch {
+        return ''
+      }
+    })()
+
+    remoteThumbnailCache.set(rawUrl, request)
+    return request
+  }
+
+  return ''
 }
 
 export function getSourceAccent(label) {
