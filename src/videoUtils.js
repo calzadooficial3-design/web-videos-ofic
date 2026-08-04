@@ -4,10 +4,17 @@ export function getVideoSource(rawUrl = '') {
 
   try {
     const url = new URL(value)
-    const host = url.hostname.replace('www.', '')
+    if (url.protocol !== 'https:') {
+      return { type: 'invalid', embedUrl: '', label: 'Enlace no permitido' }
+    }
+
+    const host = url.hostname.toLowerCase().replace(/^www\./, '')
 
     if (host === 'youtu.be') {
       const id = url.pathname.split('/').filter(Boolean)[0]
+      if (!id || !/^[\w-]{6,}$/.test(id)) {
+        return { type: 'invalid', embedUrl: '', label: 'Enlace de YouTube no válido' }
+      }
       return {
         type: 'iframe',
         provider: 'youtube',
@@ -18,10 +25,10 @@ export function getVideoSource(rawUrl = '') {
       }
     }
 
-    if (host.includes('youtube.com')) {
+    if (host === 'youtube.com' || host.endsWith('.youtube.com')) {
       const parts = url.pathname.split('/').filter(Boolean)
       const id = url.searchParams.get('v') || (['embed', 'shorts', 'live'].includes(parts[0]) ? parts[1] : '')
-      if (id) return {
+      if (id && /^[\w-]{6,}$/.test(id)) return {
         type: 'iframe',
         provider: 'youtube',
         id,
@@ -31,7 +38,7 @@ export function getVideoSource(rawUrl = '') {
       }
     }
 
-    if (host.includes('drive.google.com')) {
+    if (host === 'drive.google.com') {
       const match = url.pathname.match(/\/file\/d\/([^/]+)/) || url.pathname.match(/\/d\/([^/]+)/)
       const id = match?.[1] || url.searchParams.get('id')
       if (id) return {
@@ -44,7 +51,7 @@ export function getVideoSource(rawUrl = '') {
       }
     }
 
-    if (host.includes('vimeo.com')) {
+    if (host === 'vimeo.com' || host.endsWith('.vimeo.com')) {
       const id = url.pathname.split('/').filter(Boolean).find((part) => /^\d+$/.test(part))
       if (id) return {
         type: 'iframe',
@@ -55,7 +62,7 @@ export function getVideoSource(rawUrl = '') {
       }
     }
 
-    if (host.includes('loom.com')) {
+    if (host === 'loom.com' || host.endsWith('.loom.com')) {
       const parts = url.pathname.split('/').filter(Boolean)
       const id = parts.at(-1)
       if (id) return {
@@ -72,7 +79,7 @@ export function getVideoSource(rawUrl = '') {
       return { type: 'video', provider: 'direct', embedUrl: value, label: 'Archivo directo' }
     }
 
-    return { type: 'iframe', embedUrl: value, label: 'Sitio externo' }
+    return { type: 'invalid', embedUrl: '', label: 'Proveedor no compatible' }
   } catch {
     return { type: 'invalid', embedUrl: '', label: 'Enlace no válido' }
   }

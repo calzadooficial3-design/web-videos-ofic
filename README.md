@@ -17,15 +17,7 @@ Para comprobar la conexión configurada con Supabase:
 npm run check:supabase
 ```
 
-### Códigos de la demo
-
-| Rol | Código |
-| --- | --- |
-| Administrador | `AUREA26` |
-| Operante | `OPERA26` |
-| Jefe | `JEFE26` |
-
-El administrador puede cambiar estos códigos desde su panel. En la demo, la configuración se guarda en `localStorage`, por lo que solo persiste en el navegador actual.
+La aplicación lee y guarda la configuración en Supabase. `localStorage` se usa únicamente para recordar el tema y la sesión administrada por Supabase Auth; los códigos nunca se guardan en el bundle ni en texto plano en la base de datos.
 
 ## Funciones incluidas
 
@@ -36,6 +28,8 @@ El administrador puede cambiar estos códigos desde su panel. En la demo, la con
 - Título, descripción, duración y opción de contenido destacado.
 - Panel para crear, renombrar, ordenar, ocultar y eliminar secciones.
 - Panel para crear, editar, buscar y eliminar videos.
+- Configuración general de identidad, bienvenida, ayuda y modo claro.
+- Guardado automático transaccional y versionado en Supabase, con lectura al iniciar y al volver a enfocar la página.
 - Vista previa de permisos por rol.
 - Tema negro/dorado y modo claro.
 - Diseño responsive para escritorio, tablet y móvil.
@@ -50,15 +44,25 @@ El archivo `netlify.toml` ya configura:
 
 - Comando de build: `npm run build`
 - Carpeta publicada: `dist`
+- Functions: `netlify/functions`
 - Redirección SPA hacia `index.html`
 
-En Netlify puedes importar el repositorio y aceptar estos valores detectados.
+En Netlify configura estas variables y vuelve a desplegar:
+
+```env
+VITE_SUPABASE_URL=https://tu-proyecto.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=tu-clave-publicable
+SUPABASE_SECRET_KEY=tu-clave-secreta
+ACCESS_CODE_PEPPER=valor-aleatorio-largo-y-privado
+```
+
+`SUPABASE_SECRET_KEY` y `ACCESS_CODE_PEPPER` deben marcarse como secretos y nunca llevar el prefijo `VITE_`. Las dos variables `VITE_*` se incluyen en el cliente por diseño; los secretos solo están disponibles para Netlify Functions. Genera el pepper con al menos 32 bytes aleatorios y mantenlo igual en tu entorno local y en Netlify.
+
+Si agregas o cambias `ACCESS_CODE_PEPPER`, vuelve a ejecutar `npm run provision:supabase-roles` con los tres códigos actuales para regenerar sus huellas antes de desplegar.
 
 ## ¿Es necesario Supabase?
 
-Para probar el diseño, no. Para publicar el sistema con datos reales, sí necesitas Supabase o un backend equivalente.
-
-`localStorage` no es seguridad: los códigos y datos pueden inspeccionarse o modificarse desde el navegador y no se sincronizan entre dispositivos. En producción, Supabase debe encargarse de:
+Sí. Esta versión usa Supabase como fuente de verdad para:
 
 - Autenticar el código y crear una sesión.
 - Guardar secciones, videos y asignaciones.
@@ -66,6 +70,6 @@ Para probar el diseño, no. Para publicar el sistema con datos reales, sí neces
 - Impedir que operante o jefe descarguen registros no autorizados.
 - Guardar videos privados o generar enlaces temporales cuando corresponda.
 
-La propuesta de tablas y políticas está en [`supabase/schema.sql`](supabase/schema.sql). La guía de conexión segura está en [`docs/SUPABASE.md`](docs/SUPABASE.md).
+Las migraciones versionadas están en [`supabase/migrations`](supabase/migrations), los datos iniciales en [`supabase/seed.sql`](supabase/seed.sql) y la guía de conexión segura en [`docs/SUPABASE.md`](docs/SUPABASE.md).
 
-> No publiques la demo actual como sistema privado hasta conectar el backend. Ocultar contenido solo con React no constituye una barrera de seguridad.
+Antes del primer login ejecuta `npm run provision:supabase-roles` con los tres códigos solo en variables temporales; consulta la guía para el procedimiento completo.
