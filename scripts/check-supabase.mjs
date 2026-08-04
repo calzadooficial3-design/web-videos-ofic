@@ -38,13 +38,13 @@ for (const check of checks) {
 }
 
 try {
-  const supabase = createClient(projectUrl, publishableKey, {
+  const publicClient = createClient(projectUrl, publishableKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   })
-  const { error, status } = await supabase.from('sections').select('id').limit(1)
+  const { error, status } = await publicClient.from('sections').select('id').limit(1)
 
-  if (!error) {
-    console.log(`OK · Cliente web y API de datos · HTTP ${status}`)
+  if (!error || error.code === '42501' || status === 401) {
+    console.log(`OK · Cliente web conectado y acceso anónimo bloqueado por RLS · HTTP ${status}`)
   } else if (error.code === 'PGRST205') {
     console.log('OK · Cliente web conectado; la tabla public.sections todavía no existe en el proyecto')
   } else {
@@ -53,6 +53,25 @@ try {
   }
 } catch (error) {
   console.log(`ERROR · Cliente web y API de datos · ${error.name}`)
+  failed = true
+}
+
+try {
+  const serviceClient = createClient(projectUrl, secretKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+  const { count, error, status } = await serviceClient
+    .from('sections')
+    .select('id', { count: 'exact', head: true })
+
+  if (error) {
+    console.log(`ERROR · Lectura administrativa de tablas · HTTP ${status || 'sin respuesta'} · ${error.code || error.message}`)
+    failed = true
+  } else {
+    console.log(`OK · Lectura administrativa de tablas · ${count ?? 0} secciones`)
+  }
+} catch (error) {
+  console.log(`ERROR · Lectura administrativa de tablas · ${error.name}`)
   failed = true
 }
 

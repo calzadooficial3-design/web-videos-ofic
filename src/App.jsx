@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -41,11 +41,28 @@ import {
   Video,
   X,
 } from 'lucide-react'
-import { createDefaultData, DEFAULT_CODES, ROLE_META } from './data'
+import { ROLE_META } from './data'
+import {
+  getCurrentAccessContext,
+  getCurrentSession,
+  loadVideoHubSnapshot,
+  loginWithCode as authenticateWithCode,
+  onAuthStateChange,
+  rotateAccessCodes,
+  saveAdminSnapshot,
+  signOut,
+} from './lib/videoHubApi'
+import { createAdminSaveRevisionTracker } from './lib/adminSaveRevision'
 import { getSourceAccent, getVideoSource, resolveVideoThumbnail } from './videoUtils'
 
-const STORAGE_KEY = 'aurea-video-hub-data-v1'
-const THEME_KEY = 'aurea-video-hub-theme'
+const EMPTY_DATA = {
+  organization: 'Almacén de Remates',
+  organizationId: '',
+  settings: null,
+  sections: [],
+  videos: [],
+}
+const SAVE_DELAY_MS = 700
 
 const ICONS = {
   home: Home,
@@ -89,90 +106,439 @@ function getVideoAudience(video) {
   return 'none'
 }
 
-function readData() {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (!saved) return createDefaultData()
+function editableSnapshotFingerprint(snapshot) {
+  if (!snapshot) return ''
+  return JSON.stringify({
+    organization: snapshot.organization || '',
+    settings: snapshot.settings || null,
+    sections: (snapshot.sections || []).map((section) => ({
+      id: section.id,
+      name: section.name,
+      slug: section.slug || '',
+      icon: section.icon,
+      roles: [...(section.roles || [])].sort(),
+      order: section.order,
+    })),
+    videos: (snapshot.videos || []).map((video) => ({
+      id: video.id,
+      title: video.title,
+      description: video.description,
+      url: video.url,
+      thumbnailUrl: video.thumbnailUrl || '',
+      duration: video.duration,
+      assignments: video.assignments || {},
+      locked: video.locked || {},
+      featured: Boolean(video.featured),
+      createdAt: video.createdAt,
+      source: video.source || null,
+    })),
+  })
+}
 
-    const parsed = JSON.parse(saved)
-    const updatedDemoUrls = {
-      'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4': 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4',
-      'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4': 'https://www.w3schools.com/html/mov_bbb.mp4',
-      'https://vimeo.com/76979871': 'https://vimeo.com/863362136',
-    }
-
-    return {
-      ...parsed,
-      organization: parsed.organization === 'Aurea' ? 'Almacén de Remates' : parsed.organization,
-      videos: (parsed.videos || []).map((video) => {
-        const assignments = video.assignments || {}
-        const locked = Object.fromEntries(
-          VIEWER_ROLES
-            .filter((role) => assignments[role])
-            .map((role) => [role, Boolean(video.locked?.[role])]),
-        )
-
-        return {
-          ...video,
-          assignments,
-          locked,
-          url: updatedDemoUrls[video.url] || video.url,
-        }
-      }),
-    }
-  } catch {
-    return createDefaultData()
-  }
+function getErrorMessage(error, fallback) {
+  return error instanceof Error && error.message ? error.message : fallback
 }
 
 function App() {
-  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || 'dark')
-  const [data, setData] = useState(readData)
-  const [session, setSession] = useState(null)
+  const [theme, setTheme] = useState('dark')
+  const [data, setData] = useState(null)
+  const [session, setSession] = useState(undefined)
+  const [accessContext, setAccessContext] = useState(null)
+  const [loadingData, setLoadingData] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [saveState, setSaveState] = useState({ status: 'idle', error: '' })
+  const [saveRetry, setSaveRetry] = useState(0)
+  const [loggingOut, setLoggingOut] = useState(false)
+  const loadEpochRef = useRef(0)
+  const lastSavedFingerprintRef = useRef('')
+  const latestDataRef = useRef(null)
+  const saveTimerRef = useRef(null)
+  const saveQueueRef = useRef(Promise.resolve())
+  const saveRevisionRef = useRef(0)
+  const contentRevisionTrackerRef = useRef(null)
+  const backgroundRefreshRef = useRef(false)
+  const sessionUserIdRef = useRef(null)
+  const loginInProgressRef = useRef(false)
+
+  if (!contentRevisionTrackerRef.current) {
+    contentRevisionTrackerRef.current = createAdminSaveRevisionTracker()
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
-    localStorage.setItem(THEME_KEY, theme)
   }, [theme])
 
+  const clearAuthenticatedState = useCallback(() => {
+    loadEpochRef.current += 1
+    saveRevisionRef.current += 1
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+    setSession(null)
+    sessionUserIdRef.current = null
+    setAccessContext(null)
+    setData(null)
+    latestDataRef.current = null
+    lastSavedFingerprintRef.current = ''
+    contentRevisionTrackerRef.current.reset()
+    setLoadingData(false)
+    setLoadError('')
+    setSaveState({ status: 'idle', error: '' })
+  }, [])
+
+  const hydrateSession = useCallback(async (nextSession, knownContext = null) => {
+    if (!nextSession) {
+      clearAuthenticatedState()
+      return null
+    }
+
+    const epoch = ++loadEpochRef.current
+    sessionUserIdRef.current = nextSession.user?.id || null
+    setSession(nextSession)
+    setLoadingData(true)
+    setLoadError('')
+
+    try {
+      const context = knownContext || await getCurrentAccessContext()
+      const snapshot = await loadVideoHubSnapshot({ context })
+      if (epoch !== loadEpochRef.current) return null
+
+      contentRevisionTrackerRef.current.reset(snapshot.revision)
+      lastSavedFingerprintRef.current = editableSnapshotFingerprint(snapshot)
+      latestDataRef.current = snapshot
+      setAccessContext(context)
+      setData(snapshot)
+      setSaveState({ status: 'saved', error: '' })
+      return snapshot
+    } catch (error) {
+      if (epoch === loadEpochRef.current) {
+        setAccessContext(null)
+        setData(null)
+        setLoadError(getErrorMessage(error, 'No se pudieron cargar los datos de Supabase.'))
+      }
+      throw error
+    } finally {
+      if (epoch === loadEpochRef.current) setLoadingData(false)
+    }
+  }, [clearAuthenticatedState])
+
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+    let active = true
+
+    getCurrentSession()
+      .then((currentSession) => {
+        if (!active) return null
+        return hydrateSession(currentSession)
+      })
+      .catch((error) => {
+        if (!active) return
+        setSession(null)
+        setLoadingData(false)
+        setLoadError(getErrorMessage(error, 'No se pudo iniciar la conexión con Supabase.'))
+      })
+
+    const unsubscribe = onAuthStateChange((event, nextSession) => {
+      if (!active) return
+      if (event === 'SIGNED_OUT') {
+        clearAuthenticatedState()
+      } else if (nextSession && ['SIGNED_IN', 'TOKEN_REFRESHED', 'USER_UPDATED'].includes(event)) {
+        setSession(nextSession)
+        if (
+          event === 'SIGNED_IN'
+          && !loginInProgressRef.current
+          && nextSession.user?.id !== sessionUserIdRef.current
+        ) {
+          window.setTimeout(() => hydrateSession(nextSession).catch(() => undefined), 0)
+        }
+      }
+    })
+
+    return () => {
+      active = false
+      loadEpochRef.current += 1
+      unsubscribe()
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+    }
+  }, [clearAuthenticatedState, hydrateSession])
+
+  useEffect(() => {
+    latestDataRef.current = data
   }, [data])
+
+  useEffect(() => {
+    if (
+      accessContext
+      && accessContext.role !== 'admin'
+      && data?.settings?.allowLightMode === false
+      && theme !== 'dark'
+    ) setTheme('dark')
+  }, [accessContext, data?.settings?.allowLightMode, theme])
+
+  useEffect(() => {
+    if (!data || loadingData || accessContext?.role !== 'admin') return undefined
+
+    const fingerprint = editableSnapshotFingerprint(data)
+    if (fingerprint === lastSavedFingerprintRef.current) return undefined
+
+    const revision = ++saveRevisionRef.current
+    setSaveState({ status: 'pending', error: '' })
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+
+    saveTimerRef.current = window.setTimeout(() => {
+      const snapshot = data
+      const context = accessContext
+      saveQueueRef.current = saveQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (revision < saveRevisionRef.current) return
+          setSaveState({ status: 'saving', error: '' })
+          const savedSnapshot = await saveAdminSnapshot(
+            contentRevisionTrackerRef.current.rebase(snapshot),
+            { context },
+          )
+          contentRevisionTrackerRef.current.confirm(savedSnapshot.revision)
+          if (revision === saveRevisionRef.current) {
+            const savedFingerprint = editableSnapshotFingerprint(savedSnapshot)
+            lastSavedFingerprintRef.current = savedFingerprint
+            latestDataRef.current = savedSnapshot
+            setData(savedSnapshot)
+            setSaveState({ status: 'saved', error: '' })
+          } else {
+            lastSavedFingerprintRef.current = fingerprint
+          }
+        })
+        .catch((error) => {
+          if (revision === saveRevisionRef.current) {
+            setSaveState({
+              status: 'error',
+              error: getErrorMessage(error, 'No se pudieron guardar los cambios.'),
+              code: error?.code || '',
+            })
+          }
+        })
+    }, SAVE_DELAY_MS)
+
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+    }
+  }, [accessContext, data, loadingData, saveRetry])
+
+  useEffect(() => {
+    if (!session?.user?.id || !accessContext) return undefined
+    let active = true
+
+    const refreshFromSupabase = async () => {
+      if (!active || document.visibilityState === 'hidden' || backgroundRefreshRef.current) return
+      const currentData = latestDataRef.current
+      const hadPendingAdminChanges = (
+        accessContext.role === 'admin'
+        && currentData
+        && editableSnapshotFingerprint(currentData) !== lastSavedFingerprintRef.current
+      )
+
+      const epoch = loadEpochRef.current
+      backgroundRefreshRef.current = true
+      try {
+        const freshContext = await getCurrentAccessContext()
+        if (!freshContext.active || freshContext.userId !== accessContext.userId) {
+          await signOut().catch(() => undefined)
+          clearAuthenticatedState()
+          return
+        }
+        const accessChanged = (
+          freshContext.role !== accessContext.role
+          || freshContext.organizationId !== accessContext.organizationId
+        )
+        if (hadPendingAdminChanges && !accessChanged) return
+        const snapshot = await loadVideoHubSnapshot({
+          context: freshContext,
+          previousSnapshot: latestDataRef.current,
+        })
+        if (!active || epoch !== loadEpochRef.current) return
+
+        const latestData = latestDataRef.current
+        if (
+          freshContext.role === 'admin'
+          && !accessChanged
+          && latestData
+          && editableSnapshotFingerprint(latestData) !== lastSavedFingerprintRef.current
+        ) return
+
+        contentRevisionTrackerRef.current.reset(snapshot.revision)
+        lastSavedFingerprintRef.current = editableSnapshotFingerprint(snapshot)
+        latestDataRef.current = snapshot
+        if (
+          freshContext.role !== accessContext.role
+          || freshContext.organizationId !== accessContext.organizationId
+        ) setAccessContext(freshContext)
+        setData(snapshot)
+      } catch (error) {
+        if (error?.code === 'PROFILE_NOT_FOUND') {
+          await signOut().catch(() => undefined)
+          clearAuthenticatedState()
+        }
+        // Una interrupción temporal no reemplaza los datos que ya están visibles.
+      } finally {
+        backgroundRefreshRef.current = false
+      }
+    }
+
+    const handleFocus = () => { refreshFromSupabase() }
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') refreshFromSupabase()
+    }
+    const interval = window.setInterval(refreshFromSupabase, 15_000)
+    window.addEventListener('focus', handleFocus)
+    document.addEventListener('visibilitychange', handleVisibility)
+
+    return () => {
+      active = false
+      window.clearInterval(interval)
+      window.removeEventListener('focus', handleFocus)
+      document.removeEventListener('visibilitychange', handleVisibility)
+    }
+  }, [accessContext, clearAuthenticatedState, session?.user?.id])
+
+  useEffect(() => {
+    const warnBeforeLeaving = (event) => {
+      if (accessContext?.role !== 'admin' || !data) return
+      if (editableSnapshotFingerprint(data) === lastSavedFingerprintRef.current) return
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', warnBeforeLeaving)
+    return () => window.removeEventListener('beforeunload', warnBeforeLeaving)
+  }, [accessContext?.role, data])
 
   const toggleTheme = () => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))
 
-  const loginWithCode = (code) => {
-    const cleanCode = code.trim().toUpperCase()
-    const role = Object.entries(data.codes).find(([, savedCode]) => savedCode.toUpperCase() === cleanCode)?.[0]
-    if (!role) return false
-    setSession({ role, signedInAt: Date.now() })
-    return true
+  const loginWithCode = async (code) => {
+    loginInProgressRef.current = true
+    try {
+      const result = await authenticateWithCode(code)
+      await hydrateSession(result.session, result.context)
+      return true
+    } finally {
+      loginInProgressRef.current = false
+    }
+  }
+
+  const retryLoad = () => {
+    if (session) hydrateSession(session).catch(() => undefined)
+  }
+
+  const retrySave = () => {
+    if (saveState.code === 'STALE_SNAPSHOT') {
+      const confirmed = window.confirm(
+        'Hay cambios más recientes en Supabase. ¿Quieres descartar esta copia y recargar la versión guardada?',
+      )
+      if (confirmed && session) hydrateSession(session).catch(() => undefined)
+      return
+    }
+    lastSavedFingerprintRef.current = `retry-${Date.now()}`
+    setSaveRetry((value) => value + 1)
+  }
+
+  const updateAccessCodes = async (codes) => {
+    const result = await rotateAccessCodes(codes)
+    if (result?.reauthenticate) {
+      await signOut().catch(() => undefined)
+      clearAuthenticatedState()
+    }
+    return result
+  }
+
+  const logout = async () => {
+    if (loggingOut) return
+    setLoggingOut(true)
+    setLoadError('')
+
+    try {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+      saveRevisionRef.current += 1
+      await saveQueueRef.current.catch(() => undefined)
+
+      const currentData = latestDataRef.current
+      if (
+        accessContext?.role === 'admin'
+        && currentData
+        && editableSnapshotFingerprint(currentData) !== lastSavedFingerprintRef.current
+      ) {
+        setSaveState({ status: 'saving', error: '' })
+        const savedSnapshot = await saveAdminSnapshot(
+          contentRevisionTrackerRef.current.rebase(currentData),
+          { context: accessContext },
+        )
+        contentRevisionTrackerRef.current.confirm(savedSnapshot.revision)
+        lastSavedFingerprintRef.current = editableSnapshotFingerprint(savedSnapshot)
+      }
+
+      await signOut()
+      clearAuthenticatedState()
+    } catch (error) {
+      setSaveState({
+        status: 'error',
+        error: getErrorMessage(error, 'No se pudo guardar o cerrar la sesión.'),
+        code: error?.code || '',
+      })
+    } finally {
+      setLoggingOut(false)
+    }
+  }
+
+  if (session === undefined || (session && loadingData)) {
+    return <AppStatusScreen title="Conectando con Supabase" text="Estamos cargando tu contenido y permisos." />
   }
 
   if (!session) {
-    return <LoginScreen data={data} theme={theme} toggleTheme={toggleTheme} onLogin={loginWithCode} />
+    return <LoginScreen data={EMPTY_DATA} theme={theme} toggleTheme={toggleTheme} onLogin={loginWithCode} serviceError={loadError} />
   }
 
-  if (session.role === 'admin') {
+  if (loadError || !data || !accessContext) {
+    return (
+      <AppStatusScreen
+        error
+        title="No se pudo cargar la plataforma"
+        text={loadError || 'La sesión no tiene un perfil activo en Supabase.'}
+        actions={<><button className="primary-button" onClick={retryLoad}>Reintentar</button><button className="secondary-button" onClick={logout}>Cerrar sesión</button></>}
+      />
+    )
+  }
+
+  if (accessContext.role === 'admin') {
     return (
       <AdminApp
         data={data}
         setData={setData}
         theme={theme}
         toggleTheme={toggleTheme}
-        onLogout={() => setSession(null)}
+        saveState={saveState}
+        onRetrySave={retrySave}
+        onRotateCodes={updateAccessCodes}
+        loggingOut={loggingOut}
+        onLogout={logout}
       />
     )
   }
 
   return (
     <ViewerApp
-      role={session.role}
+      role={accessContext.role}
       data={data}
       theme={theme}
       toggleTheme={toggleTheme}
-      onLogout={() => setSession(null)}
+      onLogout={logout}
     />
+  )
+}
+
+function AppStatusScreen({ title, text, actions = null, error = false }) {
+  return (
+    <main className={`app-status-screen ${error ? 'app-status-screen--error' : ''}`}>
+      <CompanyLogo />
+      <span className="app-status-screen__icon">{error ? <CircleHelp size={26} /> : <span className="loading-spinner" />}</span>
+      <h1>{title}</h1>
+      <p>{text}</p>
+      {actions && <div className="app-status-screen__actions">{actions}</div>}
+    </main>
   )
 }
 
@@ -251,13 +617,13 @@ function VideoThumbnail({ video, className = '' }) {
   return null
 }
 
-function LoginScreen({ data, theme, toggleTheme, onLogin }) {
+function LoginScreen({ data, theme, toggleTheme, onLogin, serviceError = '' }) {
   const [code, setCode] = useState('')
   const [showCode, setShowCode] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault()
     setError('')
     if (!code.trim()) {
@@ -265,13 +631,13 @@ function LoginScreen({ data, theme, toggleTheme, onLogin }) {
       return
     }
     setLoading(true)
-    window.setTimeout(() => {
-      const accepted = onLogin(code)
-      if (!accepted) {
-        setError('El código no es válido. Compruébalo e inténtalo nuevamente.')
-        setLoading(false)
-      }
-    }, 420)
+    try {
+      await onLogin(code)
+    } catch (loginError) {
+      setError(getErrorMessage(loginError, 'El código no es válido. Compruébalo e inténtalo nuevamente.'))
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -319,12 +685,14 @@ function LoginScreen({ data, theme, toggleTheme, onLogin }) {
                   placeholder="••••••••"
                   autoComplete="current-password"
                   autoFocus
+                  disabled={loading}
                 />
                 <button type="button" onClick={() => setShowCode((value) => !value)} aria-label={showCode ? 'Ocultar código' : 'Mostrar código'}>
                   {showCode ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
               </div>
               {error && <p className="form-error">{error}</p>}
+              {!error && serviceError && <p className="form-error">{serviceError}</p>}
               <button className="primary-button primary-button--wide" type="submit" disabled={loading}>
                 <span>{loading ? 'Verificando…' : 'Ingresar a la plataforma'}</span>
                 {!loading && <ArrowRight size={18} />}
@@ -346,11 +714,22 @@ const ADMIN_NAV = [
   { id: 'overview', label: 'Resumen', icon: LayoutDashboard },
   { id: 'sections', label: 'Secciones', icon: FolderCog },
   { id: 'videos', label: 'Biblioteca', icon: Video },
+  { id: 'settings', label: 'Configuración', icon: Settings2 },
   { id: 'access', label: 'Códigos de acceso', icon: KeyRound },
   { id: 'preview', label: 'Vista por rol', icon: Eye },
 ]
 
-function AdminApp({ data, setData, theme, toggleTheme, onLogout }) {
+function AdminApp({
+  data,
+  setData,
+  theme,
+  toggleTheme,
+  saveState,
+  onRetrySave,
+  onRotateCodes,
+  loggingOut,
+  onLogout,
+}) {
   const [page, setPage] = useState('overview')
   const [menuOpen, setMenuOpen] = useState(false)
 
@@ -360,6 +739,8 @@ function AdminApp({ data, setData, theme, toggleTheme, onLogout }) {
   }
 
   const removeSection = (sectionId) => {
+    const sectionName = data.sections.find((section) => section.id === sectionId)?.name || 'esta sección'
+    if (!window.confirm(`¿Eliminar ${sectionName}? También se quitarán sus asignaciones de video.`)) return
     setData((current) => ({
       ...current,
       sections: current.sections.filter((section) => section.id !== sectionId),
@@ -375,12 +756,14 @@ function AdminApp({ data, setData, theme, toggleTheme, onLogout }) {
     overview: ['Resumen general', 'Todo bajo control, en un solo lugar.'],
     sections: ['Secciones y navegación', 'Define lo que aparece en el menú de cada rol.'],
     videos: ['Biblioteca de videos', 'Publica contenido y decide quién puede verlo.'],
+    settings: ['Configuración general', 'Personaliza los textos y preferencias de la plataforma.'],
     access: ['Códigos de acceso', 'Administra la entrada independiente de cada rol.'],
     preview: ['Vista por rol', 'Comprueba la experiencia antes de compartirla.'],
   }
 
   return (
-    <div className="app-layout">
+    <div className={`app-layout ${loggingOut ? 'app-layout--busy' : ''}`}>
+      {loggingOut && <div className="app-saving-overlay"><span className="loading-spinner" /><strong>Guardando y cerrando sesión…</strong></div>}
       <button className={`mobile-overlay ${menuOpen ? 'is-visible' : ''}`} onClick={() => setMenuOpen(false)} aria-label="Cerrar menú" />
       <aside className={`sidebar admin-sidebar ${menuOpen ? 'is-open' : ''}`}>
         <div className="sidebar__top">
@@ -401,7 +784,7 @@ function AdminApp({ data, setData, theme, toggleTheme, onLogout }) {
         </nav>
         <div className="sidebar__bottom">
           <ThemeToggle theme={theme} onToggle={toggleTheme} />
-          <button className="sidebar-action" onClick={onLogout}><LogOut size={18} /><span>Cerrar sesión</span></button>
+          <button className="sidebar-action" onClick={onLogout} disabled={loggingOut}><LogOut size={18} /><span>{loggingOut ? 'Guardando…' : 'Cerrar sesión'}</span></button>
         </div>
       </aside>
 
@@ -410,7 +793,15 @@ function AdminApp({ data, setData, theme, toggleTheme, onLogout }) {
           <button className="mobile-menu" onClick={() => setMenuOpen(true)}><Menu size={21} /></button>
           <div className="topbar__title"><small>ADMINISTRACIÓN</small><strong>{titles[page][0]}</strong></div>
           <div className="topbar__right">
-            <span className="status-dot"><i /> Sistema activo</span>
+            <span className={`status-dot status-dot--${saveState.status}`} title={saveState.error || undefined}>
+              <i />
+              {saveState.status === 'pending' && 'Cambios pendientes'}
+              {saveState.status === 'saving' && 'Guardando en Supabase…'}
+              {saveState.status === 'saved' && 'Guardado en Supabase'}
+              {saveState.status === 'error' && 'Error al guardar'}
+              {saveState.status === 'idle' && 'Conectado a Supabase'}
+            </span>
+            {saveState.status === 'error' && <button className="save-retry-button" type="button" onClick={onRetrySave}>{saveState.code === 'STALE_SNAPSHOT' ? 'Recargar' : 'Reintentar'}</button>}
             <div className="admin-avatar">AD</div>
           </div>
         </header>
@@ -421,10 +812,46 @@ function AdminApp({ data, setData, theme, toggleTheme, onLogout }) {
           {page === 'overview' && <AdminOverview data={data} onNavigate={navigate} />}
           {page === 'sections' && <SectionsManager data={data} setData={setData} onRemove={removeSection} />}
           {page === 'videos' && <VideosManager data={data} setData={setData} />}
-          {page === 'access' && <AccessManager data={data} setData={setData} />}
+          {page === 'settings' && <SettingsManager data={data} setData={setData} />}
+          {page === 'access' && <AccessManager onRotateCodes={onRotateCodes} />}
           {page === 'preview' && <RolePreview data={data} />}
+          {saveState.status === 'error' && <div className="save-error-banner"><CircleHelp size={17} /><span>{saveState.error}</span><button type="button" onClick={onRetrySave}>{saveState.code === 'STALE_SNAPSHOT' ? 'Recargar desde Supabase' : 'Reintentar'}</button></div>}
         </main>
       </section>
+    </div>
+  )
+}
+
+function SettingsManager({ data, setData }) {
+  const settings = data.settings || {
+    productName: 'Video Hub',
+    welcomeTitle: 'Todo lo que necesitas aprender, en un solo lugar.',
+    welcomeMessage: '',
+    supportMessage: 'Contacta a tu administrador',
+    allowLightMode: true,
+  }
+
+  const updateSetting = (key, value) => {
+    setData((current) => ({
+      ...current,
+      settings: { ...settings, ...(current.settings || {}), [key]: value },
+    }))
+  }
+
+  return (
+    <div className="manager-stack">
+      <section className="panel settings-panel">
+        <div className="panel-heading"><div><h2>Identidad y experiencia</h2><p>Estos cambios se guardan en Supabase y se aplican a las vistas de los roles.</p></div></div>
+        <div className="general-settings-form">
+          <div className="form-group"><label>Nombre de la organización</label><input value={data.organization || ''} onChange={(event) => setData((current) => ({ ...current, organization: event.target.value }))} maxLength="120" /></div>
+          <div className="form-group"><label>Nombre del portal</label><input value={settings.productName} onChange={(event) => updateSetting('productName', event.target.value)} maxLength="80" /></div>
+          <div className="form-group general-settings-form__wide"><label>Título de bienvenida</label><input value={settings.welcomeTitle} onChange={(event) => updateSetting('welcomeTitle', event.target.value)} maxLength="180" /></div>
+          <div className="form-group general-settings-form__wide"><label>Mensaje de bienvenida</label><textarea value={settings.welcomeMessage} onChange={(event) => updateSetting('welcomeMessage', event.target.value)} rows="4" placeholder="Escribe el mensaje que verán Operante y Jefe." /></div>
+          <div className="form-group general-settings-form__wide"><label>Mensaje de ayuda</label><input value={settings.supportMessage} onChange={(event) => updateSetting('supportMessage', event.target.value)} placeholder="Ej. Escribe al administrador" /></div>
+          <label className="feature-check general-settings-form__wide"><input type="checkbox" checked={settings.allowLightMode !== false} onChange={(event) => updateSetting('allowLightMode', event.target.checked)} /><span><Sun size={16} /></span><div><strong>Permitir modo claro</strong><small>Los usuarios podrán alternar entre el tema oscuro y claro.</small></div></label>
+        </div>
+      </section>
+      <div className="info-callout"><Settings2 size={19} /><div><strong>Guardado automático</strong><p>El indicador superior confirma cuándo la configuración ya está persistida en Supabase.</p></div></div>
     </div>
   )
 }
@@ -499,7 +926,7 @@ function SectionsManager({ data, setData, onRemove }) {
     event.preventDefault()
     if (!draft.name.trim() || !draft.roles.length) return
     const section = {
-      id: `${draft.name.toLowerCase().replace(/[^a-z0-9áéíóúñ]+/gi, '-').replace(/^-|-$/g, '')}-${Date.now().toString(36)}`,
+      id: crypto.randomUUID(),
       name: draft.name.trim(),
       icon: draft.icon,
       roles: draft.roles,
@@ -520,12 +947,14 @@ function SectionsManager({ data, setData, onRemove }) {
   }
 
   const move = (sectionId, direction) => {
-    const sorted = [...data.sections].sort((a, b) => a.order - b.order)
-    const index = sorted.findIndex((section) => section.id === sectionId)
-    const target = index + direction
-    if (target < 0 || target >= sorted.length) return
-    ;[sorted[index], sorted[target]] = [sorted[target], sorted[index]]
-    setData((current) => ({ ...current, sections: sorted.map((section, order) => ({ ...section, order })) }))
+    setData((current) => {
+      const sorted = [...current.sections].sort((a, b) => a.order - b.order)
+      const index = sorted.findIndex((section) => section.id === sectionId)
+      const target = index + direction
+      if (index < 0 || target < 0 || target >= sorted.length) return current
+      ;[sorted[index], sorted[target]] = [sorted[target], sorted[index]]
+      return { ...current, sections: sorted.map((section, order) => ({ ...section, order })) }
+    })
   }
 
   const saveName = (id) => {
@@ -658,13 +1087,17 @@ function VideosManager({ data, setData }) {
     }
     setData((current) => editingId
       ? { ...current, videos: current.videos.map((video) => video.id === editingId ? { ...video, ...payload } : video) }
-      : { ...current, videos: [{ ...payload, id: `video-${Date.now().toString(36)}`, createdAt: new Date().toISOString() }, ...current.videos] })
+      : { ...current, videos: [{ ...payload, id: crypto.randomUUID(), createdAt: new Date().toISOString() }, ...current.videos] })
     setFormOpen(false)
     setEditingId(null)
     setDraft(emptyVideoDraft)
   }
 
-  const deleteVideo = (id) => setData((current) => ({ ...current, videos: current.videos.filter((video) => video.id !== id) }))
+  const deleteVideo = (id) => {
+    const videoTitle = data.videos.find((video) => video.id === id)?.title || 'este video'
+    if (!window.confirm(`¿Eliminar “${videoTitle}” de Supabase?`)) return
+    setData((current) => ({ ...current, videos: current.videos.filter((video) => video.id !== id) }))
+  }
   const source = getVideoSource(draft.url)
   const filtered = data.videos.filter((video) => video.title.toLowerCase().includes(query.toLowerCase()))
   const groupOrder = ['operator', 'boss', 'both']
@@ -683,14 +1116,14 @@ function VideosManager({ data, setData }) {
           <div className="manager-toolbar"><div><span className="eyebrow eyebrow--plain">{editingId ? 'EDITAR CONTENIDO' : 'NUEVO CONTENIDO'}</span><h2>{editingId ? 'Actualizar video' : 'Agregar un video'}</h2></div><button className="icon-button" onClick={() => setFormOpen(false)}><X size={19} /></button></div>
           <form className="video-form" onSubmit={saveVideo}>
             <div className="video-form__main">
-              <div className="form-group"><label>Título del video</label><input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Ej. Procedimiento de apertura" /></div>
+              <div className="form-group"><label>Título del video</label><input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Ej. Procedimiento de apertura" maxLength="180" /></div>
               <div className="form-group"><label>Descripción</label><textarea value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="Explica brevemente qué aprenderá la persona…" rows="4" /></div>
-              <div className="form-group"><label>Enlace del video</label><div className="url-input"><UploadCloud size={18} /><input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="Pega un enlace de YouTube, Google Drive, Vimeo o MP4" /></div>{draft.url && <small className={`source-detection source-detection--${source.type}`}><i style={{ background: getSourceAccent(source.label) }} /> {source.label}</small>}<small>En Google Drive, configura el archivo como “Cualquier persona con el enlace”.</small></div>
+              <div className="form-group"><label>Enlace del video</label><div className="url-input"><UploadCloud size={18} /><input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="Pega un enlace de YouTube, Google Drive, Vimeo o MP4" maxLength="2048" /></div>{draft.url && <small className={`source-detection source-detection--${source.type}`}><i style={{ background: getSourceAccent(source.label) }} /> {source.label}</small>}<small>En Google Drive, configura el archivo como “Cualquier persona con el enlace”.</small></div>
               <div className="thumbnail-config">
-                <div className="form-group"><label>Miniatura personalizada <span>(opcional)</span></label><div className="url-input"><ImageIcon size={18} /><input value={draft.thumbnailUrl} onChange={(event) => setDraft({ ...draft, thumbnailUrl: event.target.value })} placeholder="Se obtiene automáticamente; pega una imagen solo si quieres reemplazarla" /></div><small>YouTube, Drive, Vimeo y Loom generan su imagen automáticamente. Los MP4 muestran su primer fotograma.</small></div>
+                <div className="form-group"><label>Miniatura personalizada <span>(opcional)</span></label><div className="url-input"><ImageIcon size={18} /><input value={draft.thumbnailUrl} onChange={(event) => setDraft({ ...draft, thumbnailUrl: event.target.value })} placeholder="Se obtiene automáticamente; pega una imagen solo si quieres reemplazarla" maxLength="2048" /></div><small>YouTube, Drive, Vimeo y Loom generan su imagen automáticamente. Los MP4 muestran su primer fotograma.</small></div>
                 <div className="thumbnail-preview"><VideoThumbnail video={{ title: draft.title || 'Vista previa', url: draft.url, thumbnailUrl: draft.thumbnailUrl }} /><span><ImageIcon size={18} /></span><small>VISTA PREVIA</small></div>
               </div>
-              <div className="form-row"><div className="form-group"><label>Duración (opcional)</label><input value={draft.duration} onChange={(event) => setDraft({ ...draft, duration: event.target.value })} placeholder="Ej. 05:30" /></div><label className="feature-check"><input type="checkbox" checked={draft.featured} onChange={(event) => setDraft({ ...draft, featured: event.target.checked })} /><span><Sparkles size={16} /></span><div><strong>Video destacado</strong><small>Aparecerá primero en el inicio</small></div></label></div>
+              <div className="form-row"><div className="form-group"><label>Duración (opcional)</label><input value={draft.duration} onChange={(event) => setDraft({ ...draft, duration: event.target.value })} placeholder="Ej. 05:30" maxLength="20" /></div><label className="feature-check"><input type="checkbox" checked={draft.featured} onChange={(event) => setDraft({ ...draft, featured: event.target.checked })} /><span><Sparkles size={16} /></span><div><strong>Video destacado</strong><small>Aparecerá primero en el inicio</small></div></label></div>
             </div>
             <div className="assignment-box">
               <div><h3>Permisos y ubicación</h3><p>Elige exactamente quién lo verá y dónde aparecerá.</p></div>
@@ -758,27 +1191,39 @@ function AdminVideoCard({ video, data, onEdit, onDelete }) {
   )
 }
 
-function AccessManager({ data, setData }) {
-  const [codes, setCodes] = useState(data.codes)
+function AccessManager({ onRotateCodes }) {
+  const [codes, setCodes] = useState({ admin: '', operator: '', boss: '' })
   const [visible, setVisible] = useState({})
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
 
-  const save = (event) => {
+  const save = async (event) => {
     event.preventDefault()
-    const normalizedCodes = Object.values(codes).map((code) => code.trim().toUpperCase())
-    if (normalizedCodes.some((code) => code.length < 6)) {
-      setError('Cada código debe tener al menos 6 caracteres.')
+    const normalizedEntries = Object.entries(codes).map(([role, code]) => [role, code.trim().toUpperCase()])
+    const normalizedCodes = Object.fromEntries(normalizedEntries)
+    const values = Object.values(normalizedCodes)
+    if (values.some((code) => code.length < 8 || code.length > 128)) {
+      setError('Cada código nuevo debe tener entre 8 y 128 caracteres.')
       return
     }
-    if (new Set(normalizedCodes).size !== normalizedCodes.length) {
+    if (new Set(values).size !== values.length) {
       setError('Cada rol debe tener un código diferente.')
       return
     }
     setError('')
-    setData((current) => ({ ...current, codes: Object.fromEntries(Object.entries(codes).map(([role, code]) => [role, code.trim().toUpperCase()])) }))
-    setSaved(true)
-    window.setTimeout(() => setSaved(false), 2200)
+    setSaving(true)
+    try {
+      await onRotateCodes(normalizedCodes)
+      setCodes({ admin: '', operator: '', boss: '' })
+      setVisible({})
+      setSaved(true)
+      window.setTimeout(() => setSaved(false), 2600)
+    } catch (saveError) {
+      setError(getErrorMessage(saveError, 'No se pudieron actualizar los códigos.'))
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -789,16 +1234,16 @@ function AccessManager({ data, setData }) {
           {Object.keys(ROLE_META).map((role) => (
             <div className={`code-card code-card--${role}`} key={role}>
               <div className="code-card__role"><span>{ROLE_META[role].short}</span><div><strong>{ROLE_META[role].label}</strong><small>{role === 'admin' ? 'Configuración total' : role === 'operator' ? 'Contenido operativo' : 'Contenido de liderazgo'}</small></div></div>
-              <label>Código actual</label>
-              <div className="code-editor"><input type={visible[role] ? 'text' : 'password'} value={codes[role]} onChange={(event) => { setCodes({ ...codes, [role]: event.target.value }); setError('') }} /><button type="button" onClick={() => setVisible({ ...visible, [role]: !visible[role] })}>{visible[role] ? <EyeOff size={17} /> : <Eye size={17} />}</button><button type="button" onClick={() => navigator.clipboard?.writeText(codes[role])}><Copy size={17} /></button></div>
-              <small className="code-rule">Mínimo 6 caracteres · Se convertirá a mayúsculas</small>
+              <label>Nuevo código</label>
+              <div className="code-editor"><input type={visible[role] ? 'text' : 'password'} value={codes[role]} onChange={(event) => { setCodes({ ...codes, [role]: event.target.value }); setError(''); setSaved(false) }} autoComplete="new-password" disabled={saving} /><button type="button" onClick={() => setVisible({ ...visible, [role]: !visible[role] })} disabled={saving}>{visible[role] ? <EyeOff size={17} /> : <Eye size={17} />}</button><button type="button" onClick={() => navigator.clipboard?.writeText(codes[role])} disabled={!codes[role] || saving}><Copy size={17} /></button></div>
+              <small className="code-rule">Entre 8 y 128 caracteres · Recomendamos 16 o más</small>
             </div>
           ))}
         </div>
         {error && <p className="form-error form-error--box access-error">{error}</p>}
-        <div className="form-actions"><span className={`saved-message ${saved ? 'show' : ''}`}><Check size={15} /> Códigos guardados</span><button className="primary-button" type="submit"><ShieldCheck size={17} /> Guardar códigos</button></div>
+        <div className="form-actions"><span className={`saved-message ${saved ? 'show' : ''}`}><Check size={15} /> Códigos actualizados</span><button className="primary-button" type="submit" disabled={saving}><ShieldCheck size={17} /> {saving ? 'Actualizando…' : 'Actualizar los tres códigos'}</button></div>
       </form>
-      <aside className="security-card"><span><LockKeyhole size={22} /></span><h3>Seguridad para producción</h3><p>En esta demo los códigos se guardan en este navegador. Antes de publicar, conéctalos a Supabase mediante una función segura para que nunca queden expuestos en el frontend.</p><ul><li><Check size={14} /> Códigos cifrados</li><li><Check size={14} /> Sesiones con vencimiento</li><li><Check size={14} /> Políticas por rol</li></ul></aside>
+      <aside className="security-card"><span><LockKeyhole size={22} /></span><h3>Seguridad activa</h3><p>Por seguridad, los códigos actuales no se pueden consultar. Al guardar se actualizan las cuentas de acceso y sus huellas protegidas en Supabase.</p><ul><li><Check size={14} /> Códigos fuera del frontend</li><li><Check size={14} /> Sesiones administradas por Supabase</li><li><Check size={14} /> Permisos RLS por rol</li></ul></aside>
     </div>
   )
 }
@@ -809,6 +1254,15 @@ function RolePreview({ data }) {
   const [selectedVideo, setSelectedVideo] = useState(null)
   const [query, setQuery] = useState('')
   const [navOpen, setNavOpen] = useState(false)
+  useEffect(() => {
+    if (!selectedVideo) return
+    const freshVideo = data.videos.find((video) => video.id === selectedVideo.id)
+    if (!freshVideo || !isVideoAssignedTo(freshVideo, role) || isVideoLockedFor(freshVideo, role)) {
+      setSelectedVideo(null)
+    } else if (freshVideo !== selectedVideo) {
+      setSelectedVideo(freshVideo)
+    }
+  }, [data.videos, role, selectedVideo])
   const sections = useMemo(() => [...data.sections].filter((section) => section.roles.includes(role)).sort((a, b) => a.order - b.order), [data.sections, role])
   const visibleSectionIds = new Set(sections.map((section) => section.id))
   const videos = data.videos.filter((video) => visibleSectionIds.has(video.assignments[role]))
@@ -860,7 +1314,7 @@ function RolePreview({ data }) {
               <small className="sidebar-label sidebar-label--spaced">MI CONTENIDO</small>
               {sections.map((section) => { const Icon = ICONS[section.icon] || Layers3; return <button className={activeSection === section.id ? 'active' : ''} onClick={() => navigate(section.id)} key={section.id}><Icon size={18} /><span>{section.name}</span><small>{videos.filter((video) => video.assignments[role] === section.id).length}</small></button> })}
             </nav>
-            <div className="sidebar-help"><span><CircleHelp size={16} /></span><div><strong>¿Necesitas ayuda?</strong><small>Contacta a tu administrador</small></div></div>
+            <div className="sidebar-help"><span><CircleHelp size={16} /></span><div><strong>¿Necesitas ayuda?</strong><small>{data.settings?.supportMessage || 'Contacta a tu administrador'}</small></div></div>
             <div className="role-preview-sidebar-foot"><Eye size={15} /> Vista simulada</div>
           </aside>
 
@@ -874,7 +1328,7 @@ function RolePreview({ data }) {
               {selectedVideo ? (
                 <VideoPlayerPage video={selectedVideo} role={role} data={data} onBack={() => setSelectedVideo(null)} onPlay={openVideo} />
               ) : activeSection === 'home' && !query ? (
-                <ViewerHome role={role} videos={videos} sections={sections} featured={featured} lockedCount={blockedVideos.length} onPlay={openVideo} onSection={navigate} />
+                <ViewerHome role={role} settings={data.settings} videos={videos} sections={sections} featured={featured} lockedCount={blockedVideos.length} onPlay={openVideo} onSection={navigate} />
               ) : (
                 <VideoListing role={role} title={activeSection === 'home' ? 'Resultados de búsqueda' : activeSectionData?.name || 'Videos'} subtitle={query ? `Resultados para “${query}”` : 'Contenido seleccionado para este perfil'} videos={filtered} onPlay={openVideo} />
               )}
@@ -898,6 +1352,16 @@ function ViewerApp({ role, data, theme, toggleTheme, onLogout }) {
   const [selectedVideo, setSelectedVideo] = useState(null)
   const [query, setQuery] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
+
+  useEffect(() => {
+    if (!selectedVideo) return
+    const freshVideo = data.videos.find((video) => video.id === selectedVideo.id)
+    if (!freshVideo || !isVideoAssignedTo(freshVideo, role) || isVideoLockedFor(freshVideo, role)) {
+      setSelectedVideo(null)
+    } else if (freshVideo !== selectedVideo) {
+      setSelectedVideo(freshVideo)
+    }
+  }, [data.videos, role, selectedVideo])
 
   const openVideo = (video) => {
     if (!video || isVideoLockedFor(video, role)) return
@@ -931,8 +1395,8 @@ function ViewerApp({ role, data, theme, toggleTheme, onLogout }) {
           <small className="sidebar-label sidebar-label--spaced">MI CONTENIDO</small>
           {sections.map((section) => { const Icon = ICONS[section.icon] || Layers3; return <button className={activeSection === section.id ? 'active' : ''} onClick={() => navigate(section.id)} key={section.id}><Icon size={19} /><span>{section.name}</span><small>{targetedVideos.filter((video) => video.assignments[role] === section.id).length}</small></button> })}
         </nav>
-        <div className="sidebar-help"><span><CircleHelp size={17} /></span><div><strong>¿Necesitas ayuda?</strong><small>Contacta a tu administrador</small></div></div>
-        <div className="sidebar__bottom"><ThemeToggle theme={theme} onToggle={toggleTheme} /><button className="sidebar-action" onClick={onLogout}><LogOut size={18} /><span>Cerrar sesión</span></button></div>
+        <div className="sidebar-help"><span><CircleHelp size={17} /></span><div><strong>¿Necesitas ayuda?</strong><small>{data.settings?.supportMessage || 'Contacta a tu administrador'}</small></div></div>
+        <div className="sidebar__bottom">{data.settings?.allowLightMode !== false && <ThemeToggle theme={theme} onToggle={toggleTheme} />}<button className="sidebar-action" onClick={onLogout}><LogOut size={18} /><span>Cerrar sesión</span></button></div>
       </aside>
 
       <section className="main-shell viewer-main">
@@ -946,7 +1410,7 @@ function ViewerApp({ role, data, theme, toggleTheme, onLogout }) {
           {selectedVideo ? (
             <VideoPlayerPage video={selectedVideo} role={role} data={data} onBack={() => setSelectedVideo(null)} onPlay={openVideo} />
           ) : activeSection === 'home' && !query ? (
-            <ViewerHome role={role} videos={targetedVideos} sections={sections} featured={featured} lockedCount={lockedCount} onPlay={openVideo} onSection={navigate} />
+            <ViewerHome role={role} settings={data.settings} videos={targetedVideos} sections={sections} featured={featured} lockedCount={lockedCount} onPlay={openVideo} onSection={navigate} />
           ) : (
             <VideoListing role={role} title={activeSection === 'home' ? 'Resultados de búsqueda' : activeSectionData?.name || 'Videos'} subtitle={query ? `Resultados para “${query}”` : 'Contenido seleccionado para tu perfil'} videos={filtered} onPlay={openVideo} />
           )}
@@ -956,12 +1420,12 @@ function ViewerApp({ role, data, theme, toggleTheme, onLogout }) {
   )
 }
 
-function ViewerHome({ role, videos, sections, featured, lockedCount, onPlay, onSection }) {
+function ViewerHome({ role, settings, videos, sections, featured, lockedCount, onPlay, onSection }) {
   const recent = [...videos].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
   const availableCount = videos.length - lockedCount
   return (
     <div className="viewer-home">
-      <div className="viewer-welcome"><div><span className="eyebrow"><Sparkles size={14} /> TU ESPACIO DE APRENDIZAJE</span><h1>Hola, <em>{ROLE_META[role].label}</em></h1><p>Continúa aprendiendo con el contenido preparado para ti.</p></div><div className="viewer-date"><Clock3 size={17} /><span>Contenido actualizado</span></div></div>
+      <div className="viewer-welcome"><div><span className="eyebrow"><Sparkles size={14} /> {settings?.productName || 'TU ESPACIO DE APRENDIZAJE'}</span><h1>{settings?.welcomeTitle || <>Hola, <em>{ROLE_META[role].label}</em></>}</h1><p>{settings?.welcomeMessage || 'Continúa aprendiendo con el contenido preparado para ti.'}</p></div><div className="viewer-date"><Clock3 size={17} /><span>Contenido actualizado</span></div></div>
       {featured && (
         <section className="hero-video">
           <VideoThumbnail video={featured} className="hero-video__media" />
@@ -992,15 +1456,13 @@ function VideoListing({ role, title, subtitle, videos, onPlay }) {
 function ViewerVideoCard({ role, video, section, onPlay }) {
   const locked = isVideoLockedFor(video, role)
   const source = locked ? null : getVideoSource(video.url)
-  const audience = getVideoAudience(video)
-  const audienceMeta = AUDIENCE_META[audience]
   const handlePlay = (event) => {
     event.stopPropagation()
     if (!locked) onPlay()
   }
   return (
     <article className={`viewer-video-card ${locked ? 'viewer-video-card--locked' : ''}`} onClick={locked ? undefined : onPlay} aria-disabled={locked}>
-      <div className="viewer-video-card__visual">{!locked && <VideoThumbnail video={video} />}{source && <span className="source-badge"><i style={{ background: getSourceAccent(source.label) }} />{source.label}</span>}<span className={`audience-badge audience-badge--${audience}`}><UsersRound size={11} /> {audienceMeta.label}</span>{locked ? <div className="viewer-video-card__lock"><span><LockKeyhole size={19} /></span><strong>Video bloqueado</strong></div> : <button type="button" onClick={handlePlay} aria-label={`Reproducir ${video.title}`}><Play size={19} fill="currentColor" /></button>}<small>{video.duration}</small></div>
+      <div className="viewer-video-card__visual">{!locked && <VideoThumbnail video={video} />}{source && <span className="source-badge"><i style={{ background: getSourceAccent(source.label) }} />{source.label}</span>}{locked ? <div className="viewer-video-card__lock"><span><LockKeyhole size={19} /></span><strong>Video bloqueado</strong></div> : <button type="button" onClick={handlePlay} aria-label={`Reproducir ${video.title}`}><Play size={19} fill="currentColor" /></button>}<small>{video.duration}</small></div>
       <div className="viewer-video-card__body">{section && <span>{section.name}</span>}<h3>{video.title}</h3><p>{locked ? 'El administrador mantiene este contenido bloqueado para tu rol.' : video.description}</p><button type="button" disabled={locked} onClick={handlePlay}>{locked ? <><LockKeyhole size={13} /> Contenido bloqueado</> : <>Ver video <ArrowRight size={14} /></>}</button></div>
     </article>
   )
@@ -1019,7 +1481,7 @@ function VideoPlayerPage({ video, role, data, onBack, onPlay }) {
       <div className="player-layout">
         <div>
           <div className="video-frame">
-            {source.type === 'video' ? <video src={source.embedUrl} controls playsInline /> : source.type === 'iframe' ? <iframe src={source.embedUrl} title={video.title} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen /> : <div className="video-error"><Film size={32} /><p>No se pudo cargar este enlace.</p></div>}
+            {source.type === 'video' ? <video src={source.embedUrl} controls playsInline /> : source.type === 'iframe' ? <iframe src={source.embedUrl} title={video.title} referrerPolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen /> : <div className="video-error"><Film size={32} /><p>No se pudo cargar este enlace.</p></div>}
           </div>
           <div className="player-copy"><div className="player-meta"><span>{section?.name || 'Video'}</span><span><i style={{ background: getSourceAccent(source.label) }} />{source.label}</span><span><Clock3 size={14} /> {video.duration}</span></div><h1>{video.title}</h1><p>{video.description}</p></div>
         </div>
