@@ -4,6 +4,7 @@ import {
   createUserClient,
   getAccessContext,
   getServerConfiguration,
+  ServerConfigurationError,
 } from './_shared/supabase-server.js'
 
 export default async function saveAdminSnapshot(request) {
@@ -89,7 +90,14 @@ export default async function saveAdminSnapshot(request) {
     }
 
     return jsonResponse({ ok: true, revision })
-  } catch {
+  } catch (error) {
+    if (error instanceof ServerConfigurationError) {
+      return jsonResponse({
+        error: 'Falta configurar Supabase en Netlify.',
+        code: error.code,
+        missing_variables: error.missingVariables,
+      }, 503)
+    }
     return jsonResponse({ error: 'El servicio de guardado no está disponible.' }, 500)
   }
 }

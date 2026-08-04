@@ -6,6 +6,7 @@ import {
   getServerConfiguration,
   isValidAccessCode,
   normalizeAccessCode,
+  ServerConfigurationError,
 } from './_shared/supabase-server.js'
 
 const ROLES = ['admin', 'operator', 'boss']
@@ -252,7 +253,14 @@ export default async function rotateAccessCodes(request) {
     }
 
     return jsonResponse({ ok: true, rotated_roles: ROLES, reauthenticate: true })
-  } catch {
+  } catch (error) {
+    if (error instanceof ServerConfigurationError) {
+      return jsonResponse({
+        error: 'Falta configurar Supabase en Netlify.',
+        code: error.code,
+        missing_variables: error.missingVariables,
+      }, 503)
+    }
     return jsonResponse({ error: 'El servicio de códigos no está disponible.' }, 500)
   }
 }

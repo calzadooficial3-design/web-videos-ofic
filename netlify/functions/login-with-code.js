@@ -7,6 +7,7 @@ import {
   getServerConfiguration,
   isValidAccessCode,
   normalizeAccessCode,
+  ServerConfigurationError,
 } from './_shared/supabase-server.js'
 
 const INVALID_CODE_MESSAGE = 'Código de acceso no válido.'
@@ -189,7 +190,14 @@ export default async function loginWithCode(request, context) {
       organization: accessContext.organization,
       display_name: accessContext.displayName || null,
     })
-  } catch {
+  } catch (error) {
+    if (error instanceof ServerConfigurationError) {
+      return jsonResponse({
+        error: 'Falta configurar Supabase en Netlify.',
+        code: error.code,
+        missing_variables: error.missingVariables,
+      }, 503)
+    }
     return jsonResponse({ error: 'El servicio de acceso no está disponible.' }, 500)
   }
 }

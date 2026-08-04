@@ -8,9 +8,11 @@ const AUTH_OPTIONS = {
 }
 
 export class ServerConfigurationError extends Error {
-  constructor() {
-    super('Server configuration is incomplete')
+  constructor(missingVariables = []) {
+    super(`Server configuration is incomplete: ${missingVariables.join(', ')}`)
     this.name = 'ServerConfigurationError'
+    this.code = 'SERVER_CONFIGURATION_MISSING'
+    this.missingVariables = [...missingVariables]
   }
 }
 
@@ -20,9 +22,14 @@ export function getServerConfiguration() {
   const secretKey = process.env.SUPABASE_SECRET_KEY
   const accessCodePepper = process.env.ACCESS_CODE_PEPPER || secretKey
 
-  if (!url || !publishableKey || !secretKey || !accessCodePepper) {
-    throw new ServerConfigurationError()
+  const missingVariables = []
+  if (!url) missingVariables.push('VITE_SUPABASE_URL')
+  if (!publishableKey) missingVariables.push('VITE_SUPABASE_PUBLISHABLE_KEY')
+  if (!secretKey) missingVariables.push('SUPABASE_SECRET_KEY')
+  if (!accessCodePepper && !missingVariables.includes('SUPABASE_SECRET_KEY')) {
+    missingVariables.push('ACCESS_CODE_PEPPER')
   }
+  if (missingVariables.length) throw new ServerConfigurationError(missingVariables)
 
   return { url, publishableKey, secretKey, accessCodePepper }
 }
