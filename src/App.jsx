@@ -55,7 +55,6 @@ import {
 import { createAdminSaveRevisionTracker } from './lib/adminSaveRevision'
 import { getSourceAccent, getVideoSource, resolveVideoThumbnail } from './videoUtils'
 
-const THEME_KEY = 'aurea-video-hub-theme'
 const EMPTY_DATA = {
   organization: 'Almacén de Remates',
   organizationId: '',
@@ -141,7 +140,7 @@ function getErrorMessage(error, fallback) {
 }
 
 function App() {
-  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || 'dark')
+  const [theme, setTheme] = useState('dark')
   const [data, setData] = useState(null)
   const [session, setSession] = useState(undefined)
   const [accessContext, setAccessContext] = useState(null)
@@ -167,7 +166,6 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
-    localStorage.setItem(THEME_KEY, theme)
   }, [theme])
 
   const clearAuthenticatedState = useCallback(() => {

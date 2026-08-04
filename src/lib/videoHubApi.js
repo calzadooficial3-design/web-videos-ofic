@@ -163,28 +163,6 @@ async function selectRowsByIds(table, idColumn, ids, columns = '*') {
   })
 }
 
-async function deleteRowsByIds(table, idColumn, ids, filters = {}) {
-  if (!ids.length) return
-  const client = getClient()
-  for (const batch of chunk(ids)) {
-    let query = client.from(table).delete().in(idColumn, batch)
-    for (const [column, value] of Object.entries(filters)) query = query.eq(column, value)
-    const { error } = await query
-    throwDatabaseError(error, `No se pudo eliminar registros de ${table}`)
-  }
-}
-
-async function archiveRowsByIds(table, idColumn, ids, filters = {}) {
-  if (!ids.length) return
-  const client = getClient()
-  for (const batch of chunk(ids)) {
-    let query = client.from(table).update({ active: false }).in(idColumn, batch)
-    for (const [column, value] of Object.entries(filters)) query = query.eq(column, value)
-    const { error } = await query
-    throwDatabaseError(error, `No se pudo archivar registros de ${table}`)
-  }
-}
-
 async function resolveSourceUrl(source, previousVideo = null) {
   if (!source) return { url: '', expiresAt: null }
   if (source.provider !== 'supabase_storage') {
@@ -624,17 +602,10 @@ function prepareSnapshot(snapshot, organizationId, existingSections) {
   return { sectionRows, sectionRoleRows, videoRows, sourceRows, assignmentRows }
 }
 
-async function upsertRows(table, rows, onConflict) {
-  if (!rows.length) return
-  const { error } = await getClient().from(table).upsert(rows, { onConflict })
-  throwDatabaseError(error, `No se pudo guardar ${table}`)
-}
-
 /**
- * Sincroniza el estado administrativo con las tablas públicas. La operación
- * usa exclusivamente la sesión autenticada y la publishable key; RLS exige
- * que el perfil actual sea admin. Devuelve el snapshot ya persistido, con los
- * UUID definitivos, para reemplazar el estado local después de guardar.
+ * Sincroniza el estado administrativo únicamente mediante la Function de
+ * Netlify y la RPC atómica de Supabase. Devuelve el snapshot confirmado por la
+ * base de datos, con los UUID definitivos.
  */
 export async function saveAdminSnapshot(snapshot, options = {}) {
   const client = getClient()
@@ -646,22 +617,14 @@ export async function saveAdminSnapshot(snapshot, options = {}) {
   }
 
   const organizationId = context.organizationId
-  const [existingSectionsResult, existingVideosResult, existingAssignmentsResult] = await Promise.all([
-    client.from('sections').select('id,slug,active').eq('organization_id', organizationId),
-    client.from('videos').select('id,active').eq('organization_id', organizationId),
-    client.from('video_assignments').select('video_id,role').eq('organization_id', organizationId),
-  ])
+  const existingSectionsResult = await client
+    .from('sections')
+    .select('id,slug,active')
+    .eq('organization_id', organizationId)
   throwDatabaseError(existingSectionsResult.error, 'No se pudo preparar la sincronización de secciones')
-  throwDatabaseError(existingVideosResult.error, 'No se pudo preparar la sincronización de videos')
-  throwDatabaseError(existingAssignmentsResult.error, 'No se pudo preparar la sincronización de permisos')
 
   // Validar y transformar todo antes de efectuar la primera escritura.
   const prepared = prepareSnapshot(snapshot, organizationId, existingSectionsResult.data || [])
-  const desiredSectionIds = new Set(prepared.sectionRows.map((row) => row.id))
-  const desiredVideoIds = new Set(prepared.videoRows.map((row) => row.id))
-  const desiredAssignmentKeys = new Set(
-    prepared.assignmentRows.map((row) => `${row.video_id}:${row.role}`),
-  )
 
   const organizationName = String(snapshot.organization || '').trim()
   const logoUrl = String(snapshot.logoUrl || '').trim()
@@ -699,67 +662,17 @@ export async function saveAdminSnapshot(snapshot, options = {}) {
     },
   })
 
-  if (atomicSave.ok) {
-    const savedContext = {
-      ...context,
-      contentRevision: Number.isSafeInteger(Number(atomicSave.revision))
-        ? Number(atomicSave.revision)
-        : Number(snapshot.revision || 0) + 1,
-    }
-    return loadVideoHubSnapshot({ context: savedContext, codes: snapshot.codes })
-  }
-
-  if (!atomicSave.unsupported) {
+  if (!atomicSave.ok) {
     throw new VideoHubApiError('No se pudo guardar la configuración.', {
       code: 'ATOMIC_SAVE_FAILED',
     })
   }
 
-  // Compatibilidad temporal para un proyecto que todavía no aplicó la última
-  // migración. Al instalarla, todas las escrituras pasan por la RPC atómica.
-  if (organizationName) {
-    const { error } = await client
-      .from('organizations')
-      .update({ name: organizationName, logo_url: logoUrl || null })
-      .eq('id', organizationId)
-    throwDatabaseError(error, 'No se pudo guardar el nombre de la organización')
+  const savedContext = {
+    ...context,
+    contentRevision: Number.isSafeInteger(Number(atomicSave.revision))
+      ? Number(atomicSave.revision)
+      : Number(snapshot.revision || 0) + 1,
   }
-
-  if (normalizedSettings) {
-    const { error } = await client.from('app_settings').upsert({
-      organization_id: organizationId,
-      ...normalizedSettings,
-    }, { onConflict: 'organization_id' })
-    throwDatabaseError(error, 'No se pudo guardar la configuración general')
-  }
-
-  await upsertRows('sections', prepared.sectionRows, 'id')
-  await upsertRows('section_roles', prepared.sectionRoleRows, 'section_id,role')
-  await upsertRows('videos', prepared.videoRows, 'id')
-  await upsertRows('video_sources', prepared.sourceRows, 'video_id')
-  await upsertRows('video_assignments', prepared.assignmentRows, 'video_id,role')
-
-  // Una asignación eliminada en React también debe desaparecer en Supabase.
-  for (const role of VIEWER_ROLES) {
-    const staleAssignmentVideoIds = (existingAssignmentsResult.data || [])
-      .filter((row) => (
-        row.role === role
-        && desiredVideoIds.has(row.video_id)
-        && !desiredAssignmentKeys.has(`${row.video_id}:${row.role}`)
-      ))
-      .map((row) => row.video_id)
-    await deleteRowsByIds('video_assignments', 'video_id', staleAssignmentVideoIds, { role })
-  }
-
-  const staleVideoIds = (existingVideosResult.data || [])
-    .filter((row) => row.active === true && !desiredVideoIds.has(row.id))
-    .map((row) => row.id)
-  await archiveRowsByIds('videos', 'id', staleVideoIds, { organization_id: organizationId })
-
-  const staleSectionIds = (existingSectionsResult.data || [])
-    .filter((row) => row.active === true && !desiredSectionIds.has(row.id))
-    .map((row) => row.id)
-  await archiveRowsByIds('sections', 'id', staleSectionIds, { organization_id: organizationId })
-
-  return loadVideoHubSnapshot({ context, codes: snapshot.codes })
+  return loadVideoHubSnapshot({ context: savedContext, codes: snapshot.codes })
 }

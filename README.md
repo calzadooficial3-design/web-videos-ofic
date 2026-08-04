@@ -17,7 +17,7 @@ Para comprobar la conexión configurada con Supabase:
 npm run check:supabase
 ```
 
-La aplicación lee y guarda la configuración en Supabase. `localStorage` se usa únicamente para recordar el tema y la sesión administrada por Supabase Auth; los códigos nunca se guardan en el bundle ni en texto plano en la base de datos.
+La aplicación lee y guarda videos, secciones, configuración y permisos únicamente en Supabase. No existe almacenamiento local propio para contenido ni para el tema; solo Supabase Auth administra la sesión del usuario. Los códigos nunca se guardan en el bundle ni en texto plano en la base de datos.
 
 ## Funciones incluidas
 

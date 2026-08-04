@@ -6,13 +6,6 @@ import {
   getServerConfiguration,
 } from './_shared/supabase-server.js'
 
-function isMissingRpc(error) {
-  if (!error) return false
-  if (error.code === 'PGRST202') return true
-  const message = String(error.message || '')
-  return /save_admin_snapshot/i.test(message) && /not find|does not exist/i.test(message)
-}
-
 export default async function saveAdminSnapshot(request) {
   if (request.method !== 'POST') return methodNotAllowed()
 
@@ -60,11 +53,16 @@ export default async function saveAdminSnapshot(request) {
       p_expected_revision: expectedRevision,
     })
 
-    // Permite desplegar el frontend antes de aplicar la migración: React usará
-    // el guardado compatible por tablas sin exponer un 404 en el navegador.
-    if (isMissingRpc(error)) return jsonResponse({ ok: false, unsupported: true })
-
     if (error) {
+      const missingRpc = error.code === 'PGRST202'
+        || (/save_admin_snapshot/i.test(String(error.message || ''))
+          && /not find|does not exist/i.test(String(error.message || '')))
+      if (missingRpc) {
+        return jsonResponse({
+          error: 'Falta instalar la función de guardado en Supabase.',
+          code: 'SUPABASE_SCHEMA_MISSING',
+        }, 503)
+      }
       if (error.code === '40001' || error.message === 'STALE_SNAPSHOT') {
         return jsonResponse({
           error: 'Supabase tiene cambios más recientes. Recarga antes de volver a editar.',
