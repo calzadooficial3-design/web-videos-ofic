@@ -1,0 +1,22 @@
+{
+  "name": "aurea-video-hub",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check:supabase": "node scripts/check-supabase.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.4",
+    "lucide-react": "^1.28.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.5",
+    "vite": "^8.2.0"
+  }
+}

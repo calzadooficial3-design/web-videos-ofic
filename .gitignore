@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.venv/
+.env*
+!.env.example
+.netlify/
+.DS_Store
+qa-output/
+vite.*.log
