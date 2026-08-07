@@ -5,41 +5,45 @@ import {
   getAccessContext,
   getClientIp,
   getServerConfiguration,
-  isValidAccessCode,
-  normalizeAccessCode,
   ServerConfigurationError,
 } from './_shared/supabase-server.js'
 
-const INVALID_CODE_MESSAGE = 'Código de acceso no válido.'
+const INVALID_CREDENTIALS_MESSAGE = 'Usuario o contraseña no válidos.'
 const RATE_LIMIT_WINDOW_SECONDS = 15 * 60
-const MAX_CODE_FAILURES = 8
+const MAX_USER_FAILURES = 8
 const MAX_IP_FAILURES = 30
+const USERNAME_PATTERN = /^[a-z0-9._-]{3,32}$/
+const MIN_PASSWORD_LENGTH = 8
+const MAX_PASSWORD_LENGTH = 128
 
-async function recordAttempt(serviceClient, {
-  organizationId = null,
-  codeFingerprint,
-  ipFingerprint,
-  succeeded,
-}) {
+function normalizeUsername(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : ''
+}
+
+function isValidPassword(value) {
+  return typeof value === 'string' && value.length >= MIN_PASSWORD_LENGTH && value.length <= MAX_PASSWORD_LENGTH
+}
+
+async function recordAttempt(serviceClient, { organizationId = null, userFingerprint, ipFingerprint, succeeded }) {
   return serviceClient.rpc('service_record_access_attempt', {
     p_organization_id: organizationId,
-    p_code_fingerprint: codeFingerprint,
+    p_code_fingerprint: userFingerprint,
     p_ip_fingerprint: ipFingerprint,
     p_succeeded: succeeded,
   })
 }
 
-async function rejectInvalidCode(serviceClient, attempt) {
+async function rejectInvalidCredentials(serviceClient, attempt) {
   const { error } = await recordAttempt(serviceClient, { ...attempt, succeeded: false })
 
   if (error) {
     return jsonResponse({ error: 'No se pudo validar el acceso.' }, 503)
   }
 
-  return jsonResponse({ error: INVALID_CODE_MESSAGE }, 401)
+  return jsonResponse({ error: INVALID_CREDENTIALS_MESSAGE }, 401)
 }
 
-export default async function loginWithCode(request, context) {
+export default async function loginWithPassword(request, context) {
   if (request.method !== 'POST') {
     return methodNotAllowed()
   }
@@ -54,18 +58,20 @@ export default async function loginWithCode(request, context) {
     if (!body || typeof body !== 'object') {
       return jsonResponse({ error: 'Solicitud no válida.' }, 400)
     }
-    const code = normalizeAccessCode(body?.code)
+
+    const username = normalizeUsername(body?.username)
+    const password = typeof body?.password === 'string' ? body.password : ''
     const configuration = getServerConfiguration()
     const { publicClient, serviceClient } = createServerClients(configuration)
-    const codeFingerprint = createFingerprint(code, configuration.accessCodePepper)
+    const userFingerprint = createFingerprint(`user:${username}`, configuration.accessCodePepper)
     const ipFingerprint = createFingerprint(
       `ip:${getClientIp(request, context)}`,
       configuration.accessCodePepper,
     )
 
-    const [codeFailuresResult, ipFailuresResult] = await Promise.all([
+    const [userFailuresResult, ipFailuresResult] = await Promise.all([
       serviceClient.rpc('service_count_recent_failures', {
-        p_code_fingerprint: codeFingerprint,
+        p_code_fingerprint: userFingerprint,
         p_ip_fingerprint: null,
         p_window_seconds: RATE_LIMIT_WINDOW_SECONDS,
       }),
@@ -76,12 +82,12 @@ export default async function loginWithCode(request, context) {
       }),
     ])
 
-    if (codeFailuresResult.error || ipFailuresResult.error) {
+    if (userFailuresResult.error || ipFailuresResult.error) {
       return jsonResponse({ error: 'No se pudo validar el acceso.' }, 503)
     }
 
     if (
-      Number(codeFailuresResult.data || 0) >= MAX_CODE_FAILURES
+      Number(userFailuresResult.data || 0) >= MAX_USER_FAILURES
       || Number(ipFailuresResult.data || 0) >= MAX_IP_FAILURES
     ) {
       return jsonResponse(
@@ -91,85 +97,62 @@ export default async function loginWithCode(request, context) {
       )
     }
 
-    const baseAttempt = { codeFingerprint, ipFingerprint }
+    const baseAttempt = { userFingerprint, ipFingerprint }
 
-    if (!isValidAccessCode(code)) {
-      return rejectInvalidCode(serviceClient, baseAttempt)
+    if (!USERNAME_PATTERN.test(username) || !isValidPassword(password)) {
+      return rejectInvalidCredentials(serviceClient, baseAttempt)
     }
 
-    const { data: lookupRows, error: lookupError } = await serviceClient.rpc(
-      'service_lookup_access_code',
-      { p_code_fingerprint: codeFingerprint },
-    )
+    const { data: profile, error: profileError } = await serviceClient
+      .from('profiles')
+      .select('user_id, organization_id, role, active')
+      .eq('username', username)
+      .maybeSingle()
 
-    if (lookupError) {
+    if (profileError) {
       return jsonResponse({ error: 'No se pudo validar el acceso.' }, 503)
     }
 
-    const lookup = Array.isArray(lookupRows) ? lookupRows[0] : lookupRows
-
-    if (!lookup?.auth_user_id || !lookup?.organization_id || !lookup?.role) {
-      return rejectInvalidCode(serviceClient, baseAttempt)
+    if (!profile?.user_id || !profile.active) {
+      return rejectInvalidCredentials(serviceClient, baseAttempt)
     }
 
     const { data: authUserData, error: authUserError } = await serviceClient.auth.admin.getUserById(
-      lookup.auth_user_id,
+      profile.user_id,
     )
     const email = authUserData?.user?.email
 
     if (authUserError || !email) {
-      return rejectInvalidCode(serviceClient, {
-        ...baseAttempt,
-        organizationId: lookup.organization_id,
-      })
+      return rejectInvalidCredentials(serviceClient, { ...baseAttempt, organizationId: profile.organization_id })
     }
 
-    const { data: linkData, error: linkError } = await serviceClient.auth.admin.generateLink({
-      type: 'magiclink',
+    const { data: authData, error: signInError } = await publicClient.auth.signInWithPassword({
       email,
-    })
-    const tokenHash = linkData?.properties?.hashed_token
-
-    if (linkError || !tokenHash) {
-      return rejectInvalidCode(serviceClient, {
-        ...baseAttempt,
-        organizationId: lookup.organization_id,
-      })
-    }
-
-    const { data: authData, error: signInError } = await publicClient.auth.verifyOtp({
-      token_hash: tokenHash,
-      type: 'email',
+      password,
     })
     const session = authData?.session
 
     if (signInError || !session?.access_token || !session?.refresh_token || !authData?.user) {
-      return rejectInvalidCode(serviceClient, {
-        ...baseAttempt,
-        organizationId: lookup.organization_id,
-      })
+      return rejectInvalidCredentials(serviceClient, { ...baseAttempt, organizationId: profile.organization_id })
     }
 
     const accessContext = await getAccessContext(session.access_token, configuration)
     const contextMatchesLookup = (
       accessContext?.active === true
       && accessContext.userId === authData.user.id
-      && accessContext.userId === lookup.auth_user_id
-      && accessContext.organizationId === lookup.organization_id
-      && accessContext.role === lookup.role
+      && accessContext.userId === profile.user_id
+      && accessContext.organizationId === profile.organization_id
+      && accessContext.role === profile.role
     )
 
     if (!contextMatchesLookup) {
       await serviceClient.auth.admin.signOut(session.access_token, 'local')
-      return rejectInvalidCode(serviceClient, {
-        ...baseAttempt,
-        organizationId: lookup.organization_id,
-      })
+      return rejectInvalidCredentials(serviceClient, { ...baseAttempt, organizationId: profile.organization_id })
     }
 
     const { error: recordError } = await recordAttempt(serviceClient, {
       ...baseAttempt,
-      organizationId: lookup.organization_id,
+      organizationId: profile.organization_id,
       succeeded: true,
     })
 

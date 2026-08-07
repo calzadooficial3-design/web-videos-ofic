@@ -1,5 +1,15 @@
 export const VIDEO_THUMBNAIL_SECOND = 4
 
+export function parseDurationSeconds(label) {
+  const pieces = String(label || '').trim().split(':').map(Number)
+  if (!pieces.length || pieces.some((piece) => !Number.isInteger(piece) || piece < 0)) return null
+  if (pieces.length === 2 && pieces[1] < 60) return pieces[0] * 60 + pieces[1]
+  if (pieces.length === 3 && pieces[1] < 60 && pieces[2] < 60) {
+    return pieces[0] * 3600 + pieces[1] * 60 + pieces[2]
+  }
+  return null
+}
+
 export function getThumbnailSeekTime(duration, targetSecond = VIDEO_THUMBNAIL_SECOND) {
   const safeTarget = Number.isFinite(targetSecond) && targetSecond >= 0
     ? targetSecond

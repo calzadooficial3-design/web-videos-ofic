@@ -23,6 +23,7 @@ El esquema completo está en:
 supabase/migrations/20260804000000_video_hub_schema.sql
 supabase/migrations/20260804010000_require_code_sessions.sql
 supabase/migrations/20260804020000_atomic_admin_snapshot.sql
+supabase/migrations/20260806000000_username_password_auth.sql
 ```
 
 Incluye:
@@ -58,18 +59,18 @@ Si el comando muestra `PENDIENTE`, aplica en orden las migraciones indicadas y e
 
 La clave publicable y la secret key de API no sustituyen el acceso administrativo de migraciones. `db push` necesita una sesión de Supabase y puede solicitar la contraseña de PostgreSQL.
 
-## Acceso únicamente mediante código
+## Acceso con usuario y contraseña
 
-Para conservar el formulario de una sola entrada:
+Cada persona tiene su propia cuenta (`public.profiles.username`) respaldada por una cuenta real de Supabase Auth con contraseña propia:
 
-1. React envía el código a la Netlify Function `login-with-code`.
-2. La función calcula una huella HMAC usando `ACCESS_CODE_PEPPER` solo en el servidor.
-3. La RPC privada localiza el rol y la cuenta interna sin almacenar ni devolver el código en texto plano.
-4. La función genera y verifica internamente un magic link de Supabase Auth; el código nunca se usa como contraseña de Auth.
+1. React envía `{ username, password }` a la Netlify Function `login-with-password`.
+2. La función busca el perfil por `username` con el cliente `service_role` (que ignora RLS) y obtiene el correo interno asociado a esa cuenta.
+3. La función llama a `signInWithPassword` de Supabase Auth con ese correo y la contraseña recibida; Supabase Auth valida el hash de la contraseña directamente, sin trucos de magic link.
+4. La función verifica que el contexto de la sesión (`get_my_access_context`) coincide con el perfil esperado antes de devolver los tokens.
 5. React instala la sesión recibida y carga los datos permitidos.
 6. Todas las lecturas y escrituras posteriores quedan limitadas por `profiles` y las políticas RLS.
 
-No guardes códigos, la clave secreta ni la clave `service_role` en variables `VITE_*`: cualquier variable con ese prefijo termina en el JavaScript público.
+No guardes contraseñas, la clave secreta ni la clave `service_role` en variables `VITE_*`: cualquier variable con ese prefijo termina en el JavaScript público.
 
 En el frontend solo deben existir:
 
@@ -85,34 +86,36 @@ SUPABASE_SECRET_KEY
 ACCESS_CODE_PEPPER
 ```
 
-La tabla `private.role_access_codes` solo guarda una huella HMAC. Las Netlify Functions invocan las RPC reservadas a `service_role`; el frontend nunca puede consultar la tabla privada ni usar la secret key. `ACCESS_CODE_PEPPER` debe ser un valor aleatorio de al menos 32 bytes y distinto de las claves de Supabase.
+`ACCESS_CODE_PEPPER` se sigue usando para las huellas HMAC del limitador de intentos por usuario/IP (`private.access_attempts`), aunque las contraseñas ya no dependen de él. Debe ser un valor aleatorio de al menos 32 bytes y distinto de las claves de Supabase.
 
-Existe un fallback temporal que usa `SUPABASE_SECRET_KEY` si el pepper no está configurado para no romper instalaciones existentes. Antes de producción configura un pepper propio y vuelve a ejecutar el aprovisionador con los tres códigos actuales; las huellas creadas con el valor anterior dejan de coincidir.
+> **Deprecado**: la tabla `private.role_access_codes` y las RPC `service_lookup_access_code`, `service_upsert_access_code` y `service_rotate_access_codes` pertenecen al esquema anterior de "un código por rol". Ya no se usan en el login ni en el panel de administración, pero se mantienen en el esquema sin eliminarlas para no forzar una migración destructiva.
 
-## Aprovisionar las tres cuentas internas
+La migración `20260804010000_require_code_sessions.sql` restringía `current_role()`/`current_organization_id()`/`get_my_access_context()` a sesiones creadas por OTP (magic link), que era como funcionaba el login por código. La migración `20260806000000_username_password_auth.sql` reemplaza ese candado por uno equivalente para sesiones de contraseña (`amr` method `password`), que es lo que emite `signInWithPassword` en `login-with-password`.
 
-Después de aplicar las migraciones y `supabase/seed.sql`, configura temporalmente un código diferente para cada rol y ejecuta:
+## Aprovisionar la cuenta administradora
+
+Después de aplicar las migraciones (incluida `20260806000000_username_password_auth.sql`) y `supabase/seed.sql`, crea o actualiza la cuenta admin con:
 
 ```bash
-ADMIN_ACCESS_CODE='codigo-administrador' \
-OPERATOR_ACCESS_CODE='codigo-operante' \
-BOSS_ACCESS_CODE='codigo-jefe' \
-npm run provision:supabase-roles
+ADMIN_USERNAME='admin' \
+ADMIN_PASSWORD='una-contraseña-larga-y-propia' \
+npm run provision:admin-user
 ```
 
-En PowerShell, establece esas tres variables con `$env:NOMBRE='valor'` y luego ejecuta el mismo comando npm. El script lee la URL, las claves y `ACCESS_CODE_PEPPER` desde el entorno o `.env`, crea o actualiza las cuentas con contraseñas Auth aleatorias e independientes, sincroniza `public.profiles` y registra solo huellas HMAC mediante `service_upsert_access_code`.
+En PowerShell, establece esas variables con `$env:NOMBRE='valor'` y luego ejecuta el mismo comando npm. El script lee la URL y las claves desde el entorno o `.env`, crea o actualiza la cuenta Auth del administrador con esa contraseña real, y sincroniza su fila en `public.profiles` (`role: 'admin'`, `username`).
 
-Los correos internos se generan con valores no entregables. Si necesitas personalizarlos, usa `ADMIN_AUTH_EMAIL`, `OPERATOR_AUTH_EMAIL` y `BOSS_AUTH_EMAIL`. No guardes los códigos en Git ni los configures como variables `VITE_*`; elimínalos del entorno después del aprovisionamiento.
+El correo interno se genera con un valor no entregable (`video-hub-admin@accounts.invalid` por defecto; personalízalo con `ADMIN_AUTH_EMAIL`). No guardes la contraseña en Git ni la configures como variable `VITE_*`; elimínala del entorno después del aprovisionamiento.
+
+Las cuentas de **operante** y **jefe** ya no se aprovisionan por script: una vez que el administrador inicia sesión, se crean, editan y deshabilitan desde el panel **Usuarios**.
 
 ## Reglas mínimas
 
-- La rotación exige al menos 8 caracteres; usa 16 o más y 20–24 para administrador.
-- Error genérico ante un código incorrecto, sin revelar el rol.
-- Límite separado por código e IP; añade CAPTCHA si el portal estará expuesto a tráfico público no confiable.
+- Las contraseñas nuevas exigen al menos 8 caracteres; usa 16 o más para administrador.
+- Error genérico ante usuario o contraseña incorrectos, sin revelar cuál falló.
+- Límite separado por usuario e IP; añade CAPTCHA si el portal estará expuesto a tráfico público no confiable.
 - Peticiones de login JSON y mismo sitio; el endpoint rechaza envíos `cross-site` del navegador.
-- Registro público desactivado.
-- Rotación transaccional de las tres huellas desde una Netlify Function autenticada, nunca desde React directamente.
-- Revocación de refresh tokens de los tres roles cuando cambian los códigos. Los JWT ya emitidos siguen vigentes hasta su expiración configurada en Supabase.
+- Registro público desactivado; solo un administrador puede crear cuentas nuevas.
+- Deshabilitar un usuario (`profiles.active = false`) le retira el acceso a los datos de inmediato vía RLS, aunque su JWT siga vigente unos minutos.
 - Cuenta individual y MFA para administradores si el sistema tendrá información sensible.
 
 ## Videos realmente privados

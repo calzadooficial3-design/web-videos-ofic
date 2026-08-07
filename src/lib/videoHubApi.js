@@ -1,4 +1,4 @@
-import { getVideoSource } from '../videoUtils'
+import { getVideoSource, parseDurationSeconds } from '../videoUtils'
 import { isSupabaseConfigured, supabase } from './supabase'
 
 const VIEWER_ROLES = ['operator', 'boss']
@@ -15,8 +15,9 @@ const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const ID_BATCH_SIZE = 100
 const STORAGE_SIGNED_URL_TTL_SECONDS = 60 * 60
 const STORAGE_SIGNED_URL_REFRESH_MARGIN_MS = 5 * 60 * 1000
-const LOGIN_FUNCTION_URL = '/.netlify/functions/login-with-code'
-const ROTATE_CODES_FUNCTION_URL = '/.netlify/functions/rotate-access-codes'
+const LOGIN_FUNCTION_URL = '/.netlify/functions/login-with-password'
+const CREATE_USER_FUNCTION_URL = '/.netlify/functions/create-user'
+const UPDATE_USER_FUNCTION_URL = '/.netlify/functions/update-user'
 const SAVE_SNAPSHOT_FUNCTION_URL = '/.netlify/functions/save-admin-snapshot'
 const IMPORT_DRIVE_VIDEOS_FUNCTION_URL = '/.netlify/functions/import-drive-videos'
 
@@ -86,16 +87,6 @@ function slugify(value) {
   return slug || 'seccion'
 }
 
-function parseDurationSeconds(label) {
-  const pieces = String(label || '').trim().split(':').map(Number)
-  if (!pieces.length || pieces.some((piece) => !Number.isInteger(piece) || piece < 0)) return null
-  if (pieces.length === 2 && pieces[1] < 60) return pieces[0] * 60 + pieces[1]
-  if (pieces.length === 3 && pieces[1] < 60 && pieces[2] < 60) {
-    return pieces[0] * 3600 + pieces[1] * 60 + pieces[2]
-  }
-  return null
-}
-
 function formatDuration(seconds) {
   if (!Number.isInteger(seconds) || seconds < 0) return 'Video'
   const hours = Math.floor(seconds / 3600)
@@ -103,14 +94,6 @@ function formatDuration(seconds) {
   const remainingSeconds = seconds % 60
   if (hours) return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
   return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`
-}
-
-function normalizeCodes(codes) {
-  return {
-    admin: codes?.admin || '',
-    operator: codes?.operator || '',
-    boss: codes?.boss || '',
-  }
 }
 
 function mapSettings(row) {
@@ -239,16 +222,21 @@ export async function establishSession(tokens) {
   return data.session || null
 }
 
-export async function loginWithAccessCode(code) {
-  const normalizedCode = String(code || '').trim().toUpperCase()
-  if (!normalizedCode) {
-    throw new VideoHubApiError('Ingresa un código de acceso.', {
-      code: 'EMPTY_ACCESS_CODE',
+export async function loginWithCredentials(username, password) {
+  const normalizedUsername = String(username || '').trim().toLowerCase()
+  if (!normalizedUsername) {
+    throw new VideoHubApiError('Ingresa tu usuario.', {
+      code: 'EMPTY_USERNAME',
+    })
+  }
+  if (!String(password || '')) {
+    throw new VideoHubApiError('Ingresa tu contraseña.', {
+      code: 'EMPTY_PASSWORD',
     })
   }
 
   const payload = await requestFunction(LOGIN_FUNCTION_URL, {
-    body: { code: normalizedCode },
+    body: { username: normalizedUsername, password },
   })
   const session = await establishSession(payload)
   const context = await getCurrentAccessContext()
@@ -267,21 +255,89 @@ export async function loginWithAccessCode(code) {
   return { session, context }
 }
 
-// Alias corto para los consumidores que ya usan el nombre del formulario.
-export const loginWithCode = loginWithAccessCode
-
-export async function rotateAccessCodes(codes) {
+async function withAdminSession(callback) {
   const session = await getCurrentSession()
   if (!session?.access_token) {
     throw new VideoHubApiError('La sesión administrativa ya no es válida.', {
       code: 'SESSION_REQUIRED',
     })
   }
+  return callback(session.access_token)
+}
 
-  return requestFunction(ROTATE_CODES_FUNCTION_URL, {
-    body: { codes: normalizeCodes(codes) },
-    accessToken: session.access_token,
-  })
+export async function listManagedUsers() {
+  const context = await getCurrentAccessContext()
+  const { data, error } = await getClient()
+    .from('profiles')
+    .select('user_id,username,display_name,role,active,created_at')
+    .eq('organization_id', context.organizationId)
+    .in('role', ['operator', 'boss'])
+    .order('created_at')
+  throwDatabaseError(error, 'No se pudieron leer los usuarios')
+
+  return (data || []).map((row) => ({
+    userId: row.user_id,
+    username: row.username || '',
+    displayName: row.display_name || '',
+    role: row.role,
+    active: Boolean(row.active),
+    createdAt: row.created_at,
+  }))
+}
+
+export async function createUser({ username, password, role, displayName }) {
+  return withAdminSession((accessToken) => requestFunction(CREATE_USER_FUNCTION_URL, {
+    body: { username, password, role, displayName },
+    accessToken,
+  }))
+}
+
+export async function updateUser({ userId, displayName, role, active, newPassword }) {
+  return withAdminSession((accessToken) => requestFunction(UPDATE_USER_FUNCTION_URL, {
+    body: { userId, displayName, role, active, newPassword },
+    accessToken,
+  }))
+}
+
+/**
+ * Reporta el punto más lejano alcanzado en un video para el usuario actual.
+ * El trigger de la base de datos decide si eso cuenta como "visto" (mitad o
+ * más de la duración real guardada en `videos`); aquí solo enviamos segundos.
+ */
+export async function recordVideoProgress({ videoId, userId, progressSeconds, durationSeconds }) {
+  if (!videoId || !userId || !Number.isFinite(progressSeconds)) return
+  const payload = {
+    video_id: videoId,
+    user_id: userId,
+    max_progress_seconds: Math.max(0, Math.floor(progressSeconds)),
+  }
+  // Cuando el reproductor conoce la duración real (video nativo o YouTube),
+  // se reporta para que el servidor pueda autocompletar videos.duration_seconds
+  // si el admin la dejó en blanco al crear el video.
+  if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
+    payload.reported_duration_seconds = Math.round(durationSeconds)
+  }
+  const { error } = await getClient()
+    .from('video_watch_progress')
+    .upsert(payload, { onConflict: 'video_id,user_id' })
+  throwDatabaseError(error, 'No se pudo guardar el progreso del video')
+}
+
+export async function listWatchProgress() {
+  const context = await getCurrentAccessContext()
+  const { data, error } = await getClient()
+    .from('video_watch_progress')
+    .select('video_id,user_id,completed,max_progress_seconds,last_watched_at')
+    .eq('organization_id', context.organizationId)
+  throwDatabaseError(error, 'No se pudieron leer los progresos')
+
+  return (data || []).map((row) => ({
+    videoId: row.video_id,
+    userId: row.user_id,
+    completed: Boolean(row.completed),
+    maxProgressSeconds: row.max_progress_seconds,
+    lastWatchedAt: row.last_watched_at,
+  }))
 }
 
 export function onAuthStateChange(callback) {
@@ -428,8 +484,6 @@ export async function loadVideoHubSnapshot(options = {}) {
     settings: mapSettings(settingsResult.data),
     sections,
     videos,
-    // Los códigos nunca se leen de Supabase: allí solo existen sus huellas.
-    codes: normalizeCodes(options.codes),
     context,
   }
 }
@@ -702,5 +756,5 @@ export async function saveAdminSnapshot(snapshot, options = {}) {
       ? Number(atomicSave.revision)
       : Number(snapshot.revision || 0) + 1,
   }
-  return loadVideoHubSnapshot({ context: savedContext, codes: snapshot.codes })
+  return loadVideoHubSnapshot({ context: savedContext })
 }

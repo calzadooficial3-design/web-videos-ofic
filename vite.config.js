@@ -1,12 +1,14 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
-import loginWithCode from './netlify/functions/login-with-code.js'
-import rotateAccessCodes from './netlify/functions/rotate-access-codes.js'
+import loginWithPassword from './netlify/functions/login-with-password.js'
+import createUser from './netlify/functions/create-user.js'
+import updateUser from './netlify/functions/update-user.js'
 import saveAdminSnapshot from './netlify/functions/save-admin-snapshot.js'
 
 const LOCAL_FUNCTIONS = new Map([
-  ['/login-with-code', loginWithCode],
-  ['/rotate-access-codes', rotateAccessCodes],
+  ['/login-with-password', loginWithPassword],
+  ['/create-user', createUser],
+  ['/update-user', updateUser],
   ['/save-admin-snapshot', saveAdminSnapshot],
 ])
 

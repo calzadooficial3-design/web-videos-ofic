@@ -11,7 +11,6 @@ import {
   ChevronsUpDown,
   CircleHelp,
   Clock3,
-  Copy,
   Eye,
   EyeOff,
   Film,
@@ -37,21 +36,26 @@ import {
   Sun,
   Trash2,
   UploadCloud,
+  User,
   UsersRound,
   Video,
   X,
 } from 'lucide-react'
 import { ROLE_META } from './data'
 import {
+  createUser,
   getCurrentAccessContext,
   getCurrentSession,
+  listManagedUsers,
+  listWatchProgress,
   loadVideoHubSnapshot,
-  loginWithCode as authenticateWithCode,
+  loginWithCredentials as authenticateWithCredentials,
   onAuthStateChange,
   queueDriveVideoImports,
-  rotateAccessCodes,
+  recordVideoProgress,
   saveAdminSnapshot,
   signOut,
+  updateUser,
 } from './lib/videoHubApi'
 import { createAdminSaveRevisionTracker } from './lib/adminSaveRevision'
 import {
@@ -458,10 +462,10 @@ function App() {
 
   const toggleTheme = () => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))
 
-  const loginWithCode = async (code) => {
+  const loginWithCredentials = async (username, password) => {
     loginInProgressRef.current = true
     try {
-      const result = await authenticateWithCode(code)
+      const result = await authenticateWithCredentials(username, password)
       await hydrateSession(result.session, result.context)
       return true
     } finally {
@@ -483,15 +487,6 @@ function App() {
     }
     lastSavedFingerprintRef.current = `retry-${Date.now()}`
     setSaveRetry((value) => value + 1)
-  }
-
-  const updateAccessCodes = async (codes) => {
-    const result = await rotateAccessCodes(codes)
-    if (result?.reauthenticate) {
-      await signOut().catch(() => undefined)
-      clearAuthenticatedState()
-    }
-    return result
   }
 
   const logout = async () => {
@@ -537,7 +532,7 @@ function App() {
   }
 
   if (!session) {
-    return <LoginScreen data={EMPTY_DATA} theme={theme} toggleTheme={toggleTheme} onLogin={loginWithCode} serviceError={loadError} />
+    return <LoginScreen data={EMPTY_DATA} theme={theme} toggleTheme={toggleTheme} onLogin={loginWithCredentials} serviceError={loadError} />
   }
 
   if (loadError || !data || !accessContext) {
@@ -560,7 +555,8 @@ function App() {
         toggleTheme={toggleTheme}
         saveState={saveState}
         onRetrySave={retrySave}
-        onRotateCodes={updateAccessCodes}
+        onCreateUser={createUser}
+        onUpdateUser={updateUser}
         loggingOut={loggingOut}
         onLogout={logout}
       />
@@ -570,6 +566,7 @@ function App() {
   return (
     <ViewerApp
       role={accessContext.role}
+      userId={accessContext.userId}
       data={data}
       theme={theme}
       toggleTheme={toggleTheme}
@@ -690,23 +687,28 @@ function VideoThumbnail({ video, className = '' }) {
 }
 
 function LoginScreen({ data, theme, toggleTheme, onLogin, serviceError = '' }) {
-  const [code, setCode] = useState('')
-  const [showCode, setShowCode] = useState(false)
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
   const submit = async (event) => {
     event.preventDefault()
     setError('')
-    if (!code.trim()) {
-      setError('Escribe tu código de acceso para continuar.')
+    if (!username.trim()) {
+      setError('Escribe tu usuario para continuar.')
+      return
+    }
+    if (!password) {
+      setError('Escribe tu contraseña para continuar.')
       return
     }
     setLoading(true)
     try {
-      await onLogin(code)
+      await onLogin(username, password)
     } catch (loginError) {
-      setError(getErrorMessage(loginError, 'El código no es válido. Compruébalo e inténtalo nuevamente.'))
+      setError(getErrorMessage(loginError, 'El usuario o la contraseña no son válidos. Compruébalos e inténtalo nuevamente.'))
     } finally {
       setLoading(false)
     }
@@ -742,25 +744,38 @@ function LoginScreen({ data, theme, toggleTheme, onLogin, serviceError = '' }) {
             <div className="login-card__heading">
               <span>ACCESO PRIVADO</span>
               <h2>Bienvenido</h2>
-              <p>Ingresa el código que te proporcionó tu administrador.</p>
+              <p>Ingresa el usuario y la contraseña que te proporcionó tu administrador.</p>
             </div>
 
             <form onSubmit={submit}>
-              <label htmlFor="access-code">Código de acceso</label>
+              <label htmlFor="login-username">Usuario</label>
               <div className={`code-field ${error ? 'code-field--error' : ''}`}>
-                <KeyRound size={19} />
+                <User size={19} />
                 <input
-                  id="access-code"
-                  type={showCode ? 'text' : 'password'}
-                  value={code}
-                  onChange={(event) => { setCode(event.target.value); setError('') }}
-                  placeholder="••••••••"
-                  autoComplete="current-password"
+                  id="login-username"
+                  type="text"
+                  value={username}
+                  onChange={(event) => { setUsername(event.target.value); setError('') }}
+                  placeholder="usuario"
+                  autoComplete="username"
                   autoFocus
                   disabled={loading}
                 />
-                <button type="button" onClick={() => setShowCode((value) => !value)} aria-label={showCode ? 'Ocultar código' : 'Mostrar código'}>
-                  {showCode ? <EyeOff size={18} /> : <Eye size={18} />}
+              </div>
+              <label htmlFor="login-password">Contraseña</label>
+              <div className={`code-field ${error ? 'code-field--error' : ''}`}>
+                <KeyRound size={19} />
+                <input
+                  id="login-password"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(event) => { setPassword(event.target.value); setError('') }}
+                  placeholder="••••••••"
+                  autoComplete="current-password"
+                  disabled={loading}
+                />
+                <button type="button" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}>
+                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
               </div>
               {error && <p className="form-error">{error}</p>}
@@ -787,7 +802,8 @@ const ADMIN_NAV = [
   { id: 'sections', label: 'Secciones', icon: FolderCog },
   { id: 'videos', label: 'Biblioteca', icon: Video },
   { id: 'settings', label: 'Configuración', icon: Settings2 },
-  { id: 'access', label: 'Códigos de acceso', icon: KeyRound },
+  { id: 'users', label: 'Usuarios', icon: UsersRound },
+  { id: 'progress', label: 'Progreso', icon: BarChart3 },
   { id: 'preview', label: 'Vista por rol', icon: Eye },
 ]
 
@@ -798,7 +814,8 @@ function AdminApp({
   toggleTheme,
   saveState,
   onRetrySave,
-  onRotateCodes,
+  onCreateUser,
+  onUpdateUser,
   loggingOut,
   onLogout,
 }) {
@@ -829,7 +846,8 @@ function AdminApp({
     sections: ['Secciones y navegación', 'Define lo que aparece en el menú de cada rol.'],
     videos: ['Biblioteca de videos', 'Publica contenido y decide quién puede verlo.'],
     settings: ['Configuración general', 'Personaliza los textos y preferencias de la plataforma.'],
-    access: ['Códigos de acceso', 'Administra la entrada independiente de cada rol.'],
+    users: ['Usuarios', 'Crea, edita y deshabilita las cuentas de operante y jefe.'],
+    progress: ['Progreso de usuarios', 'Qué tanto ha avanzado cada persona en su contenido asignado.'],
     preview: ['Vista por rol', 'Comprueba la experiencia antes de compartirla.'],
   }
 
@@ -885,7 +903,8 @@ function AdminApp({
           {page === 'sections' && <SectionsManager data={data} setData={setData} onRemove={removeSection} />}
           {page === 'videos' && <VideosManager data={data} setData={setData} />}
           {page === 'settings' && <SettingsManager data={data} setData={setData} />}
-          {page === 'access' && <AccessManager onRotateCodes={onRotateCodes} />}
+          {page === 'users' && <UsersManager onCreateUser={onCreateUser} onUpdateUser={onUpdateUser} />}
+          {page === 'progress' && <ProgressManager data={data} />}
           {page === 'preview' && <RolePreview data={data} />}
           {saveState.status === 'error' && <div className="save-error-banner"><CircleHelp size={17} /><span>{saveState.error}</span><button type="button" onClick={onRetrySave}>{saveState.code === 'STALE_SNAPSHOT' ? 'Recargar desde Supabase' : 'Reintentar'}</button></div>}
         </main>
@@ -1263,59 +1282,221 @@ function AdminVideoCard({ video, data, onEdit, onDelete }) {
   )
 }
 
-function AccessManager({ onRotateCodes }) {
-  const [codes, setCodes] = useState({ admin: '', operator: '', boss: '' })
-  const [visible, setVisible] = useState({})
-  const [saved, setSaved] = useState(false)
+const emptyUserDraft = { username: '', displayName: '', role: 'operator', password: '' }
+const USERNAME_PATTERN = /^[a-z0-9._-]{3,32}$/
+
+function UsersManager({ onCreateUser, onUpdateUser }) {
+  const [users, setUsers] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [formOpen, setFormOpen] = useState(false)
+  const [editingUser, setEditingUser] = useState(null)
+  const [draft, setDraft] = useState(emptyUserDraft)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
-  const save = async (event) => {
-    event.preventDefault()
-    const normalizedEntries = Object.entries(codes).map(([role, code]) => [role, code.trim().toUpperCase()])
-    const normalizedCodes = Object.fromEntries(normalizedEntries)
-    const values = Object.values(normalizedCodes)
-    if (values.some((code) => code.length < 8 || code.length > 128)) {
-      setError('Cada código nuevo debe tener entre 8 y 128 caracteres.')
-      return
+  const refresh = async () => {
+    setLoading(true)
+    setLoadError('')
+    try {
+      setUsers(await listManagedUsers())
+    } catch (fetchError) {
+      setLoadError(getErrorMessage(fetchError, 'No se pudieron cargar los usuarios.'))
+    } finally {
+      setLoading(false)
     }
-    if (new Set(values).size !== values.length) {
-      setError('Cada rol debe tener un código diferente.')
-      return
-    }
+  }
+
+  useEffect(() => { refresh() }, [])
+
+  const openCreate = () => {
+    setEditingUser(null)
+    setDraft(emptyUserDraft)
     setError('')
+    setFormOpen(true)
+  }
+
+  const openEdit = (user) => {
+    setEditingUser(user)
+    setDraft({ username: user.username, displayName: user.displayName, role: user.role, password: '' })
+    setError('')
+    setFormOpen(true)
+  }
+
+  const closeForm = () => {
+    setFormOpen(false)
+    setEditingUser(null)
+  }
+
+  const submit = async (event) => {
+    event.preventDefault()
+    setError('')
+    const displayName = draft.displayName.trim()
+    const username = draft.username.trim().toLowerCase()
+
+    if (!displayName) {
+      setError('Escribe un nombre para el usuario.')
+      return
+    }
+    if (!editingUser && !USERNAME_PATTERN.test(username)) {
+      setError('El usuario debe tener entre 3 y 32 caracteres (minúsculas, números, puntos o guiones).')
+      return
+    }
+    if (!editingUser && draft.password.length < 8) {
+      setError('La contraseña debe tener al menos 8 caracteres.')
+      return
+    }
+    if (editingUser && draft.password && draft.password.length < 8) {
+      setError('La nueva contraseña debe tener al menos 8 caracteres.')
+      return
+    }
+
     setSaving(true)
     try {
-      await onRotateCodes(normalizedCodes)
-      setCodes({ admin: '', operator: '', boss: '' })
-      setVisible({})
-      setSaved(true)
-      window.setTimeout(() => setSaved(false), 2600)
+      if (editingUser) {
+        await onUpdateUser({
+          userId: editingUser.userId,
+          displayName,
+          role: draft.role,
+          newPassword: draft.password || undefined,
+        })
+      } else {
+        await onCreateUser({ username, password: draft.password, role: draft.role, displayName })
+      }
+      closeForm()
+      await refresh()
     } catch (saveError) {
-      setError(getErrorMessage(saveError, 'No se pudieron actualizar los códigos.'))
+      setError(getErrorMessage(saveError, 'No se pudo guardar el usuario.'))
     } finally {
       setSaving(false)
     }
   }
 
+  const toggleActive = async (user) => {
+    try {
+      await onUpdateUser({ userId: user.userId, active: !user.active })
+      await refresh()
+    } catch (toggleError) {
+      setLoadError(getErrorMessage(toggleError, 'No se pudo actualizar el usuario.'))
+    }
+  }
+
   return (
     <div className="access-layout">
-      <form className="panel access-panel" onSubmit={save}>
-        <div className="panel-heading"><div><h2>Claves por perfil</h2><p>Usa un código diferente y difícil de adivinar para cada tipo de acceso.</p></div></div>
-        <div className="code-cards">
-          {Object.keys(ROLE_META).map((role) => (
-            <div className={`code-card code-card--${role}`} key={role}>
-              <div className="code-card__role"><span>{ROLE_META[role].short}</span><div><strong>{ROLE_META[role].label}</strong><small>{role === 'admin' ? 'Configuración total' : role === 'operator' ? 'Contenido operativo' : 'Contenido de liderazgo'}</small></div></div>
-              <label>Nuevo código</label>
-              <div className="code-editor"><input type={visible[role] ? 'text' : 'password'} value={codes[role]} onChange={(event) => { setCodes({ ...codes, [role]: event.target.value }); setError(''); setSaved(false) }} autoComplete="new-password" disabled={saving} /><button type="button" onClick={() => setVisible({ ...visible, [role]: !visible[role] })} disabled={saving}>{visible[role] ? <EyeOff size={17} /> : <Eye size={17} />}</button><button type="button" onClick={() => navigator.clipboard?.writeText(codes[role])} disabled={!codes[role] || saving}><Copy size={17} /></button></div>
-              <small className="code-rule">Entre 8 y 128 caracteres · Recomendamos 16 o más</small>
+      <section className="panel access-panel manager-panel">
+        <div className="manager-toolbar">
+          <div><h2>Usuarios operante y jefe</h2><p>Crea cuentas individuales y controla su acceso.</p></div>
+          <button className="primary-button" onClick={() => (formOpen ? closeForm() : openCreate())}>{formOpen ? <X size={17} /> : <Plus size={17} />} {formOpen ? 'Cancelar' : 'Nuevo usuario'}</button>
+        </div>
+
+        {formOpen && (
+          <form className="inline-form" onSubmit={submit}>
+            <div className="form-group"><label>Usuario</label><input value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} placeholder="ej. jperez" disabled={!!editingUser} autoFocus={!editingUser} /></div>
+            <div className="form-group grow"><label>Nombre</label><input value={draft.displayName} onChange={(event) => setDraft({ ...draft, displayName: event.target.value })} placeholder="Nombre completo" /></div>
+            <div className="form-group"><label>Rol</label><select value={draft.role} onChange={(event) => setDraft({ ...draft, role: event.target.value })}><option value="operator">Operante</option><option value="boss">Jefe</option></select></div>
+            <div className="form-group"><label>{editingUser ? 'Nueva contraseña' : 'Contraseña'}</label><input type="password" value={draft.password} onChange={(event) => setDraft({ ...draft, password: event.target.value })} placeholder={editingUser ? 'Dejar en blanco para no cambiar' : '••••••••'} autoComplete="new-password" /></div>
+            <button className="primary-button form-submit" type="submit" disabled={saving}>{saving ? 'Guardando…' : editingUser ? 'Guardar cambios' : 'Crear usuario'}</button>
+          </form>
+        )}
+        {error && <p className="form-error form-error--box access-error">{error}</p>}
+
+        <div className="user-list">
+          <div className="user-list__head"><span>Usuario</span><span>Rol</span><span>Estado</span><span>Acciones</span></div>
+          {!loading && loadError && <p className="form-error access-error">{loadError}</p>}
+          {!loading && !loadError && users.map((user) => (
+            <div className="user-row" key={user.userId}>
+              <div className="section-identity"><span className="section-icon"><User size={18} /></span><div><strong>{user.displayName || user.username}</strong><small>@{user.username}</small></div></div>
+              <span className="status-badge">{ROLE_META[user.role]?.label || user.role}</span>
+              <span className={`status-badge ${user.active ? '' : 'status-badge--off'}`}>{user.active ? 'Activo' : 'Deshabilitado'}</span>
+              <div className="row-actions">
+                <button onClick={() => openEdit(user)} aria-label="Editar"><Pencil size={16} /></button>
+                <button className={user.active ? 'danger' : ''} onClick={() => toggleActive(user)} aria-label={user.active ? 'Deshabilitar' : 'Habilitar'}>{user.active ? <X size={16} /> : <Check size={16} />}</button>
+              </div>
             </div>
           ))}
+          {!loading && !loadError && !users.length && <EmptyState icon={UsersRound} title="Aún no hay usuarios" text="Crea la primera cuenta de operante o jefe." />}
         </div>
-        {error && <p className="form-error form-error--box access-error">{error}</p>}
-        <div className="form-actions"><span className={`saved-message ${saved ? 'show' : ''}`}><Check size={15} /> Códigos actualizados</span><button className="primary-button" type="submit" disabled={saving}><ShieldCheck size={17} /> {saving ? 'Actualizando…' : 'Actualizar los tres códigos'}</button></div>
-      </form>
-      <aside className="security-card"><span><LockKeyhole size={22} /></span><h3>Seguridad activa</h3><p>Por seguridad, los códigos actuales no se pueden consultar. Al guardar se actualizan las cuentas de acceso y sus huellas protegidas en Supabase.</p><ul><li><Check size={14} /> Códigos fuera del frontend</li><li><Check size={14} /> Sesiones administradas por Supabase</li><li><Check size={14} /> Permisos RLS por rol</li></ul></aside>
+      </section>
+      <aside className="security-card"><span><LockKeyhole size={22} /></span><h3>Cuentas individuales</h3><p>Cada usuario inicia sesión con su propio usuario y contraseña, administrados por Supabase Auth.</p><ul><li><Check size={14} /> Contraseñas fuera del frontend</li><li><Check size={14} /> Sesiones administradas por Supabase</li><li><Check size={14} /> Permisos RLS por rol</li></ul></aside>
+    </div>
+  )
+}
+
+function ProgressManager({ data }) {
+  const [users, setUsers] = useState([])
+  const [progress, setProgress] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+
+  useEffect(() => {
+    let active = true
+    setLoading(true)
+    setLoadError('')
+    Promise.all([listManagedUsers(), listWatchProgress()])
+      .then(([usersResult, progressResult]) => {
+        if (!active) return
+        setUsers(usersResult)
+        setProgress(progressResult)
+      })
+      .catch((fetchError) => {
+        if (active) setLoadError(getErrorMessage(fetchError, 'No se pudo cargar el progreso.'))
+      })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [])
+
+  const eligibleVideoIdsByRole = useMemo(() => {
+    const result = { operator: new Set(), boss: new Set() }
+    for (const role of ['operator', 'boss']) {
+      const visibleSectionIds = new Set(data.sections.filter((section) => section.roles.includes(role)).map((section) => section.id))
+      data.videos.forEach((video) => {
+        if (visibleSectionIds.has(video.assignments[role]) && !isVideoLockedFor(video, role)) {
+          result[role].add(video.id)
+        }
+      })
+    }
+    return result
+  }, [data.sections, data.videos])
+
+  const completedByUser = useMemo(() => {
+    const map = new Map()
+    progress.forEach((row) => {
+      if (!row.completed) return
+      if (!map.has(row.userId)) map.set(row.userId, new Set())
+      map.get(row.userId).add(row.videoId)
+    })
+    return map
+  }, [progress])
+
+  return (
+    <div className="manager-stack">
+      <section className="panel manager-panel">
+        <div className="manager-toolbar">
+          <div><h2>Progreso por usuario</h2><p>Un video cuenta como visto cuando el usuario alcanza al menos la mitad de su duración.</p></div>
+        </div>
+        <div className="progress-list">
+          <div className="progress-list__head"><span>Usuario</span><span>Rol</span><span>Progreso</span></div>
+          {!loading && loadError && <p className="form-error access-error">{loadError}</p>}
+          {!loading && !loadError && users.map((user) => {
+            const eligible = eligibleVideoIdsByRole[user.role] || new Set()
+            const completed = completedByUser.get(user.userId) || new Set()
+            const completedCount = [...eligible].filter((id) => completed.has(id)).length
+            const total = eligible.size
+            const percent = total ? Math.round((completedCount / total) * 100) : 0
+            return (
+              <div className="progress-row" key={user.userId}>
+                <div className="section-identity"><span className="section-icon"><User size={18} /></span><div><strong>{user.displayName || user.username}</strong><small>@{user.username}</small></div></div>
+                <span className="status-badge">{ROLE_META[user.role]?.label || user.role}</span>
+                <div className="progress-bar-cell">
+                  <div className="progress-bar"><i style={{ width: `${percent}%` }} /></div>
+                  <span>{total ? `${completedCount}/${total} · ${percent}%` : 'Sin videos asignados'}</span>
+                </div>
+              </div>
+            )
+          })}
+          {!loading && !loadError && !users.length && <EmptyState icon={BarChart3} title="Aún no hay usuarios" text="Crea usuarios de operante o jefe para ver su progreso." />}
+        </div>
+      </section>
     </div>
   )
 }
@@ -1413,7 +1594,7 @@ function RolePreview({ data }) {
   )
 }
 
-function ViewerApp({ role, data, theme, toggleTheme, onLogout }) {
+function ViewerApp({ role, userId, data, theme, toggleTheme, onLogout }) {
   const sections = useMemo(() => [...data.sections].filter((section) => section.roles.includes(role)).sort((a, b) => a.order - b.order), [data.sections, role])
   const targetedVideos = useMemo(() => {
     const visibleSectionIds = new Set(sections.map((section) => section.id))
@@ -1480,7 +1661,7 @@ function ViewerApp({ role, data, theme, toggleTheme, onLogout }) {
 
         <main className="content-area viewer-content">
           {selectedVideo ? (
-            <VideoPlayerPage video={selectedVideo} role={role} data={data} onBack={() => setSelectedVideo(null)} onPlay={openVideo} />
+            <VideoPlayerPage video={selectedVideo} role={role} userId={userId} data={data} onBack={() => setSelectedVideo(null)} onPlay={openVideo} />
           ) : activeSection === 'home' && !query ? (
             <ViewerHome role={role} settings={data.settings} videos={targetedVideos} sections={sections} featured={featured} lockedCount={lockedCount} onPlay={openVideo} onSection={navigate} />
           ) : (
@@ -1540,17 +1721,181 @@ function ViewerVideoCard({ role, video, section, onPlay }) {
   )
 }
 
-function VideoPlayerMedia({ source, title }) {
+const PROGRESS_REPORT_INTERVAL_SECONDS = 10
+
+let youTubeApiPromise = null
+
+// Carga el reproductor oficial de YouTube (script permitido en la CSP) una
+// sola vez por sesión. Con él leemos currentTime/duration reales en vez de
+// aproximarlos, igual que con un <video> nativo.
+function loadYouTubeIframeApi() {
+  if (typeof window === 'undefined') return Promise.reject(new Error('No window'))
+  if (window.YT?.Player) return Promise.resolve(window.YT)
+  if (youTubeApiPromise) return youTubeApiPromise
+
+  youTubeApiPromise = new Promise((resolve, reject) => {
+    const previousCallback = window.onYouTubeIframeAPIReady
+    window.onYouTubeIframeAPIReady = () => {
+      previousCallback?.()
+      resolve(window.YT)
+    }
+    const script = document.createElement('script')
+    script.src = 'https://www.youtube.com/iframe_api'
+    script.async = true
+    script.onerror = () => reject(new Error('No se pudo cargar el reproductor de YouTube'))
+    document.head.appendChild(script)
+  })
+
+  return youTubeApiPromise
+}
+
+function VideoPlayerMedia({ source, title, video, userId }) {
   const frameClassName = source.provider === 'google_drive'
     ? 'video-frame video-frame--google-drive'
     : 'video-frame'
 
+  const maxProgressRef = useRef(0)
+  const lastReportedRef = useRef(0)
+  // Duración real observada por el propio reproductor (metadata del <video>
+  // nativo o player.getDuration() de YouTube). No es la duración que el admin
+  // escribió al crear el video: esa es solo un texto opcional para mostrar en
+  // pantalla y puede faltar o estar mal escrita.
+  const realDurationRef = useRef(null)
+  const youtubeElementId = useMemo(
+    () => `youtube-player-${video?.id || 'x'}-${Math.random().toString(36).slice(2, 8)}`,
+    [video?.id],
+  )
+
+  const reportProgress = useCallback((seconds) => {
+    if (!userId || !video?.id) return
+    lastReportedRef.current = seconds
+    recordVideoProgress({
+      videoId: video.id,
+      userId,
+      progressSeconds: seconds,
+      durationSeconds: realDurationRef.current || undefined,
+    }).catch(() => {
+      // El progreso es informativo; un fallo de red no debe interrumpir la reproducción.
+    })
+  }, [userId, video?.id])
+
+  const trackMaxProgress = useCallback((seconds) => {
+    if (seconds <= maxProgressRef.current) return
+    maxProgressRef.current = seconds
+    if (seconds - lastReportedRef.current >= PROGRESS_REPORT_INTERVAL_SECONDS) {
+      reportProgress(seconds)
+    }
+  }, [reportProgress])
+
+  useEffect(() => {
+    maxProgressRef.current = 0
+    lastReportedRef.current = 0
+    realDurationRef.current = null
+    if (!userId || !video?.id || source.type !== 'iframe') return undefined
+
+    if (source.provider === 'youtube') {
+      let player = null
+      let pollInterval = null
+      let cancelled = false
+
+      loadYouTubeIframeApi().then((YT) => {
+        if (cancelled) return
+        player = new YT.Player(youtubeElementId, {
+          events: {
+            onReady: () => {
+              pollInterval = window.setInterval(() => {
+                const current = player?.getCurrentTime?.()
+                const duration = player?.getDuration?.()
+                if (Number.isFinite(duration) && duration > 0) realDurationRef.current = Math.round(duration)
+                if (Number.isFinite(current)) trackMaxProgress(Math.floor(current))
+              }, 1000)
+            },
+            onStateChange: (event) => {
+              // ENDED = 0. No esperamos al siguiente sondeo ni al desmontaje:
+              // se reporta de inmediato para que "visto completo" no se pierda
+              // si el usuario deja la pestaña abierta sin navegar.
+              if (event.data === YT.PlayerState.ENDED) {
+                const finalSeconds = Math.max(maxProgressRef.current, realDurationRef.current || 0)
+                maxProgressRef.current = finalSeconds
+                reportProgress(finalSeconds)
+              }
+            },
+          },
+        })
+      }).catch(() => {
+        // Si el script de YouTube no carga (red, bloqueador de anuncios, etc.)
+        // simplemente no se reporta progreso para este video.
+      })
+
+      return () => {
+        cancelled = true
+        if (pollInterval) window.clearInterval(pollInterval)
+        player?.destroy?.()
+        if (maxProgressRef.current > lastReportedRef.current) reportProgress(maxProgressRef.current)
+      }
+    }
+
+    // Google Drive, Vimeo y Loom no exponen ninguna API de progreso para su
+    // vista previa incrustada (ni oficial ni por postMessage), así que tampoco
+    // sabemos su duración real. Se aproxima el avance con el tiempo real que
+    // el reproductor permanece visible y la pestaña está activa.
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return
+      trackMaxProgress(maxProgressRef.current + 1)
+    }, 1000)
+
+    return () => {
+      window.clearInterval(interval)
+      if (maxProgressRef.current > lastReportedRef.current) reportProgress(maxProgressRef.current)
+    }
+  }, [video?.id, userId, source.type, source.provider, youtubeElementId, reportProgress, trackMaxProgress])
+
+  const captureRealDuration = (element) => {
+    if (Number.isFinite(element.duration) && element.duration > 0) {
+      realDurationRef.current = Math.round(element.duration)
+    }
+  }
+
+  const handleTimeUpdate = (event) => {
+    captureRealDuration(event.currentTarget)
+    trackMaxProgress(Math.floor(event.currentTarget.currentTime))
+  }
+
+  const handlePause = (event) => {
+    captureRealDuration(event.currentTarget)
+    if (maxProgressRef.current > lastReportedRef.current) reportProgress(maxProgressRef.current)
+  }
+
+  const handleEnded = (event) => {
+    captureRealDuration(event.currentTarget)
+    reportProgress(Math.max(maxProgressRef.current, realDurationRef.current || maxProgressRef.current))
+  }
+
+  const iframeSrc = source.provider === 'youtube' && typeof window !== 'undefined'
+    ? `${source.embedUrl}?enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`
+    : source.embedUrl
+
   return (
     <div className={frameClassName} data-player-mode={source.type}>
       {source.type === 'video' ? (
-        <video src={source.embedUrl} controls preload="metadata" playsInline />
+        <video
+          src={source.embedUrl}
+          controls
+          preload="metadata"
+          playsInline
+          onTimeUpdate={userId ? handleTimeUpdate : undefined}
+          onPause={userId ? handlePause : undefined}
+          onEnded={userId ? handleEnded : undefined}
+        />
       ) : source.type === 'iframe' ? (
-        <iframe src={source.embedUrl} title={title} referrerPolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen />
+        <iframe
+          id={source.provider === 'youtube' ? youtubeElementId : undefined}
+          src={iframeSrc}
+          title={title}
+          referrerPolicy="strict-origin-when-cross-origin"
+          allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share"
+          allowFullScreen
+        />
       ) : (
         <div className="video-error"><Film size={32} /><p>No se pudo cargar este enlace.</p></div>
       )}
@@ -1558,7 +1903,7 @@ function VideoPlayerMedia({ source, title }) {
   )
 }
 
-function VideoPlayerPage({ video, role, data, onBack, onPlay }) {
+function VideoPlayerPage({ video, role, userId, data, onBack, onPlay }) {
   if (!isVideoAssignedTo(video, role) || isVideoLockedFor(video, role)) {
     return <div className="player-page"><button className="back-button" onClick={onBack}><ArrowLeft size={17} /> Volver a la biblioteca</button><div className="player-blocked-state"><span><LockKeyhole size={28} /></span><h2>Este video está bloqueado</h2><p>El administrador no ha habilitado su reproducción para tu rol.</p></div></div>
   }
@@ -1570,7 +1915,7 @@ function VideoPlayerPage({ video, role, data, onBack, onPlay }) {
       <button className="back-button" onClick={onBack}><ArrowLeft size={17} /> Volver a la biblioteca</button>
       <div className="player-layout">
         <div>
-          <VideoPlayerMedia source={source} title={video.title} />
+          <VideoPlayerMedia source={source} title={video.title} video={video} userId={userId} />
           <div className="player-copy"><div className="player-meta"><span>{section?.name || 'Video'}</span><span><i style={{ background: getSourceAccent(source.label) }} />{source.label}</span><span><Clock3 size={14} /> {video.duration}</span></div><h1>{video.title}</h1><p>{video.description}</p></div>
         </div>
         <aside className="related-panel"><span className="eyebrow eyebrow--plain">A CONTINUACIÓN</span><h3>En esta sección</h3>{related.map((item) => <button key={item.id} onClick={() => onPlay(item)}><span><Play size={13} fill="currentColor" /></span><div><strong>{item.title}</strong><small>{item.duration}</small></div></button>)}{!related.length && <p>No hay más videos en esta sección.</p>}<div className="privacy-mini"><ShieldCheck size={17} /><span>Contenido autorizado para {ROLE_META[role].label}</span></div></aside>

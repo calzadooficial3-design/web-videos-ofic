@@ -12,7 +12,7 @@
     "test:video-utils": "node --test scripts/video-utils.test.mjs",
     "check:supabase": "node scripts/check-supabase.mjs",
     "check:supabase-schema": "node scripts/check-supabase-schema.mjs",
-    "provision:supabase-roles": "node scripts/provision-supabase-roles.mjs",
+    "provision:admin-user": "node scripts/provision-admin-user.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
