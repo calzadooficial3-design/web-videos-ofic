@@ -2406,7 +2406,7 @@ function VideoPlayerPage({ video, role, userId, data, onBack, onPlay }) {
             </div>
             <h1>{video.title}</h1><p>{video.description}</p>
           </div>
-          {showQuiz && <PlayerQuiz video={video} userId={userId} organizationId={data.organizationId} requirePhoto={Boolean(data.settings?.requireQuizPhoto)} />}
+          {showQuiz && <PlayerQuiz video={video} userId={userId} organizationId={data.organizationId} requirePhoto={Boolean(data.settings?.requireQuizPhoto)} isWatched={isWatched} />}
         </div>
         <aside className="related-panel"><span className="eyebrow eyebrow--plain">A CONTINUACIÓN</span><h3>En esta sección</h3>{related.map((item) => <button key={item.id} onClick={() => onPlay(item)}><span><Play size={13} fill="currentColor" /></span><div><strong>{item.title}</strong><small>{item.duration}</small></div></button>)}{!related.length && <p>No hay más videos en esta sección.</p>}<div className="privacy-mini"><ShieldCheck size={17} /><span>Contenido autorizado para {ROLE_META[role].label}</span></div></aside>
       </div>
@@ -2414,7 +2414,7 @@ function VideoPlayerPage({ video, role, userId, data, onBack, onPlay }) {
   )
 }
 
-function PlayerQuiz({ video, userId, organizationId, requirePhoto }) {
+function PlayerQuiz({ video, userId, organizationId, requirePhoto, isWatched }) {
   const passingScore = video.quiz?.passingScorePercent ?? 70
   // 'intro' -> (si se exige foto) 'camera' -> 'quiz'
   const [phase, setPhase] = useState('intro')
@@ -2474,6 +2474,10 @@ function PlayerQuiz({ video, userId, organizationId, requirePhoto }) {
 
   const startQuiz = () => {
     setError('')
+    if (!isWatched) {
+      setError('Primero debes ver el video completo para poder responder el cuestionario.')
+      return
+    }
     if (requirePhoto) {
       setPhase('camera')
     } else {
