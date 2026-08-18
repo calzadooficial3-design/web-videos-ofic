@@ -2389,7 +2389,7 @@ function VideoPlayerPage({ video, role, userId, data, onBack, onPlay }) {
   const isWatched = Boolean(video.watched) || justCompleted
   const hasQuiz = Boolean(video.quiz)
   const quizPassed = Boolean(video.quizResult?.passed)
-  const showQuiz = hasQuiz && isWatched && !quizPassed
+  const showQuiz = hasQuiz && !quizPassed
   return (
     <div className="player-page">
       <button className="back-button" onClick={onBack}><ArrowLeft size={17} /> Volver a la biblioteca</button>
@@ -2427,6 +2427,7 @@ function PlayerQuiz({ video, userId, organizationId, requirePhoto }) {
   const [photoPath, setPhotoPath] = useState(null)
   const [cameraError, setCameraError] = useState('')
   const [capturingPhoto, setCapturingPhoto] = useState(false)
+  const [quizLoadKey, setQuizLoadKey] = useState(0)
   const cameraVideoRef = useRef(null)
   const cameraStreamRef = useRef(null)
 
@@ -2441,16 +2442,17 @@ function PlayerQuiz({ video, userId, organizationId, requirePhoto }) {
   }, [video.id])
 
   useEffect(() => {
-    if (phase !== 'quiz' || questions.length || loading) return
+    if (phase !== 'quiz') return
     let active = true
     setLoading(true)
     setError('')
+    setQuestions([])
     getPlayableVideoQuiz(video.id)
       .then((quiz) => { if (active) setQuestions(quiz?.questions || []) })
       .catch((quizError) => { if (active) setError(getErrorMessage(quizError, 'No se pudo cargar el cuestionario.')) })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [phase, video.id, questions.length, loading])
+  }, [phase, video.id, quizLoadKey])
 
   useEffect(() => {
     if (phase !== 'camera') return
@@ -2472,7 +2474,12 @@ function PlayerQuiz({ video, userId, organizationId, requirePhoto }) {
 
   const startQuiz = () => {
     setError('')
-    setPhase(requirePhoto ? 'camera' : 'quiz')
+    if (requirePhoto) {
+      setPhase('camera')
+    } else {
+      setQuizLoadKey((key) => key + 1)
+      setPhase('quiz')
+    }
   }
 
   const capturePhoto = async () => {
@@ -2490,6 +2497,7 @@ function PlayerQuiz({ video, userId, organizationId, requirePhoto }) {
       const path = await uploadQuizAttemptPhoto({ organizationId, userId, videoId: video.id, blob })
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop())
       setPhotoPath(path)
+      setQuizLoadKey((key) => key + 1)
       setPhase('quiz')
     } catch (captureError) {
       setCameraError(getErrorMessage(captureError, 'No se pudo guardar la foto. Inténtalo de nuevo.'))
@@ -2523,7 +2531,12 @@ function PlayerQuiz({ video, userId, organizationId, requirePhoto }) {
     setAnswers({})
     setPhotoPath(null)
     setQuestions([])
-    setPhase(requirePhoto ? 'camera' : 'quiz')
+    if (requirePhoto) {
+      setPhase('camera')
+    } else {
+      setQuizLoadKey((key) => key + 1)
+      setPhase('quiz')
+    }
   }
 
   return (
@@ -2532,7 +2545,7 @@ function PlayerQuiz({ video, userId, organizationId, requirePhoto }) {
         <span><ClipboardList size={19} /></span>
         <div>
           <h2>Cuestionario del video</h2>
-          <p>Ya viste el video completo. Responde correctamente al menos el {passingScore}% de las preguntas para marcarlo como completado.</p>
+          <p>Responde correctamente al menos el {passingScore}% de las preguntas para aprobar el cuestionario.</p>
         </div>
       </div>
 
