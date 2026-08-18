@@ -269,7 +269,7 @@ export async function listManagedUsers() {
   const context = await getCurrentAccessContext()
   const { data, error } = await getClient()
     .from('profiles')
-    .select('user_id,username,display_name,role,active,created_at')
+    .select('user_id,username,display_name,role,active,created_at,job_title,department')
     .eq('organization_id', context.organizationId)
     .in('role', ['operator', 'boss'])
     .order('created_at')
@@ -282,29 +282,33 @@ export async function listManagedUsers() {
     role: row.role,
     active: Boolean(row.active),
     createdAt: row.created_at,
+    jobTitle: row.job_title || '',
+    department: row.department || '',
   }))
 }
 
-export async function createUser({ username, password, role, displayName }) {
+export async function createUser({ username, password, role, displayName, jobTitle, department }) {
   return withAdminSession((accessToken) => requestFunction(CREATE_USER_FUNCTION_URL, {
-    body: { username, password, role, displayName },
+    body: { username, password, role, displayName, jobTitle, department },
     accessToken,
   }))
 }
 
-export async function updateUser({ userId, displayName, role, active, newPassword }) {
+export async function updateUser({ userId, displayName, role, active, newPassword, jobTitle, department }) {
   return withAdminSession((accessToken) => requestFunction(UPDATE_USER_FUNCTION_URL, {
-    body: { userId, displayName, role, active, newPassword },
+    body: { userId, displayName, role, active, newPassword, jobTitle, department },
     accessToken,
   }))
 }
 
 /**
- * Reporta el punto más lejano alcanzado en un video para el usuario actual.
- * El trigger de la base de datos decide si eso cuenta como "visto" (mitad o
- * más de la duración real guardada en `videos`); aquí solo enviamos segundos.
+ * Reporta el punto más lejano alcanzado en un video para el usuario actual,
+ * más la señal `ended` cuando el reproductor confirma el fin de la
+ * reproducción. El trigger de la base de datos decide si eso cuenta como
+ * "visto" (100% de la duración real guardada en `videos`, o `ended`); aquí
+ * solo enviamos segundos.
  */
-export async function recordVideoProgress({ videoId, userId, progressSeconds, durationSeconds }) {
+export async function recordVideoProgress({ videoId, userId, progressSeconds, durationSeconds, ended = false }) {
   if (!videoId || !userId || !Number.isFinite(progressSeconds)) return
   const payload = {
     video_id: videoId,
@@ -317,6 +321,10 @@ export async function recordVideoProgress({ videoId, userId, progressSeconds, du
   if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
     payload.reported_duration_seconds = Math.round(durationSeconds)
   }
+  // Señal explícita de que el reproductor llegó al final (evento `ended` /
+  // `ENDED`), para marcar "visto" aunque la duración guardada no coincida al
+  // segundo exacto con la duración real del archivo.
+  if (ended) payload.reported_ended = true
   const { error } = await getClient()
     .from('video_watch_progress')
     .upsert(payload, { onConflict: 'video_id,user_id' })
@@ -338,6 +346,155 @@ export async function listWatchProgress() {
     maxProgressSeconds: row.max_progress_seconds,
     lastWatchedAt: row.last_watched_at,
   }))
+}
+
+/**
+ * Resultados de cuestionario. Con RLS, un admin recibe los de toda la
+ * organización y un operante/jefe recibe únicamente los suyos, igual que
+ * `listWatchProgress`.
+ */
+export async function listVideoQuizResults() {
+  const context = await getCurrentAccessContext()
+  const { data, error } = await getClient()
+    .from('video_quiz_results')
+    .select('video_id,user_id,attempts_count,best_score_percent,passed,last_attempt_at')
+    .eq('organization_id', context.organizationId)
+  throwDatabaseError(error, 'No se pudieron leer los cuestionarios respondidos')
+
+  return (data || []).map((row) => ({
+    videoId: row.video_id,
+    userId: row.user_id,
+    attemptsCount: row.attempts_count,
+    bestScorePercent: row.best_score_percent,
+    passed: Boolean(row.passed),
+    lastAttemptAt: row.last_attempt_at,
+  }))
+}
+
+function mapQuizAttemptRow(row) {
+  return {
+    id: row.id,
+    videoId: row.video_id,
+    userId: row.user_id,
+    attemptNumber: row.attempt_number,
+    scorePercent: row.score_percent,
+    passed: Boolean(row.passed),
+    createdAt: row.created_at,
+    answers: (row.answers || []).map((answer) => ({
+      questionId: answer.questionId,
+      prompt: answer.prompt,
+      selectedLabel: answer.selectedLabel,
+      isCorrect: Boolean(answer.isCorrect),
+      correctLabel: answer.correctLabel,
+    })),
+  }
+}
+
+/**
+ * Historial completo de intentos de cuestionario de un usuario (todos sus
+ * videos), con el detalle de qué marcó en cada pregunta. Solo el propio
+ * usuario o un admin de su organización pueden leerlo (RLS).
+ */
+export async function listQuizAttemptsForUser(userId) {
+  const { data, error } = await getClient()
+    .from('video_quiz_attempts')
+    .select('id,video_id,user_id,attempt_number,score_percent,passed,answers,created_at')
+    .eq('user_id', userId)
+    .order('video_id', { ascending: true })
+    .order('attempt_number', { ascending: true })
+  throwDatabaseError(error, 'No se pudo leer el historial de cuestionarios')
+
+  return (data || []).map(mapQuizAttemptRow)
+}
+
+/**
+ * Igual que `listQuizAttemptsForUser`, pero sin filtrar por usuario: con RLS,
+ * un admin recibe los intentos de todos los usuarios de su organización
+ * (usado para el reporte Excel). Un operante/jefe solo vería los suyos.
+ */
+export async function listAllQuizAttempts() {
+  const context = await getCurrentAccessContext()
+  const { data, error } = await getClient()
+    .from('video_quiz_attempts')
+    .select('id,video_id,user_id,attempt_number,score_percent,passed,answers,created_at')
+    .eq('organization_id', context.organizationId)
+    .order('user_id', { ascending: true })
+    .order('video_id', { ascending: true })
+    .order('attempt_number', { ascending: true })
+  throwDatabaseError(error, 'No se pudo leer el historial de cuestionarios')
+
+  return (data || []).map(mapQuizAttemptRow)
+}
+
+function mapQuizPayload(payload) {
+  if (!payload) return null
+  return {
+    videoId: payload.videoId,
+    passingScorePercent: payload.passingScorePercent,
+    questions: (payload.questions || []).map((question) => ({
+      id: question.id,
+      prompt: question.prompt,
+      options: (question.options || []).map((option) => ({
+        id: option.id,
+        label: option.label,
+        ...(typeof option.isCorrect === 'boolean' ? { isCorrect: option.isCorrect } : {}),
+      })),
+    })),
+  }
+}
+
+/** Cuestionario completo (incluye la respuesta correcta) para el editor administrativo. */
+export async function getAdminVideoQuiz(videoId) {
+  const { data, error } = await getClient().rpc('admin_get_video_quiz', { p_video_id: videoId })
+  throwDatabaseError(error, 'No se pudo cargar el cuestionario')
+  return mapQuizPayload(data)
+}
+
+/** Reemplaza por completo el cuestionario de un video de forma atómica. */
+export async function saveVideoQuiz(videoId, { passingScorePercent, questions }) {
+  const { data, error } = await getClient().rpc('admin_save_video_quiz', {
+    p_video_id: videoId,
+    p_passing_score_percent: passingScorePercent,
+    p_questions: questions.map((question) => ({
+      prompt: question.prompt,
+      options: question.options.map((option) => ({
+        label: option.label,
+        isCorrect: Boolean(option.isCorrect),
+      })),
+    })),
+  })
+  throwDatabaseError(error, 'No se pudo guardar el cuestionario')
+  return data
+}
+
+export async function deleteVideoQuiz(videoId) {
+  const { error } = await getClient().rpc('admin_delete_video_quiz', { p_video_id: videoId })
+  throwDatabaseError(error, 'No se pudo eliminar el cuestionario')
+}
+
+/** Cuestionario sin respuestas correctas, para que lo responda un usuario. */
+export async function getPlayableVideoQuiz(videoId) {
+  const { data, error } = await getClient().rpc('get_playable_video_quiz', { p_video_id: videoId })
+  throwDatabaseError(error, 'No se pudo cargar el cuestionario')
+  return mapQuizPayload(data)
+}
+
+/** Envía las respuestas; el servidor corrige y nunca confía en un puntaje calculado en el navegador. */
+export async function submitVideoQuizAttempt(videoId, answers) {
+  const { data, error } = await getClient().rpc('submit_video_quiz_attempt', {
+    p_video_id: videoId,
+    p_answers: answers.map((answer) => ({ questionId: answer.questionId, optionId: answer.optionId })),
+  })
+  throwDatabaseError(error, 'No se pudo enviar el cuestionario')
+  return {
+    scorePercent: data.scorePercent,
+    correctCount: data.correctCount,
+    totalQuestions: data.totalQuestions,
+    passed: Boolean(data.passed),
+    passingScorePercent: data.passingScorePercent,
+    attemptsCount: data.attemptsCount,
+    bestScorePercent: data.bestScorePercent,
+  }
 }
 
 export function onAuthStateChange(callback) {
@@ -385,13 +542,16 @@ export async function loadVideoHubSnapshot(options = {}) {
     (options.previousSnapshot?.videos || []).map((video) => [video.id, video]),
   )
 
-  const [organizationResult, settingsResult, sectionsResult, rolesResult, videosResult, assignmentsResult] = await Promise.all([
+  const [organizationResult, settingsResult, sectionsResult, rolesResult, videosResult, assignmentsResult, quizzesResult, myProgressResult, myQuizResultsResult] = await Promise.all([
     client.from('organizations').select('id,name,slug,logo_url').eq('id', organizationId).single(),
     client.from('app_settings').select('product_name,welcome_title,welcome_message,support_message,allow_light_mode').eq('organization_id', organizationId).maybeSingle(),
     client.from('sections').select('id,name,slug,icon,sort_order,created_at').eq('organization_id', organizationId).eq('active', true).order('sort_order'),
     client.from('section_roles').select('section_id,role,visible').eq('organization_id', organizationId),
     client.from('videos').select('id,title,description,duration_label,duration_seconds,featured,created_at').eq('organization_id', organizationId).eq('active', true).order('created_at', { ascending: false }),
     client.from('video_assignments').select('video_id,role,section_id,visible,is_locked,sort_order').eq('organization_id', organizationId),
+    client.from('video_quizzes').select('video_id,passing_score_percent,question_count').eq('organization_id', organizationId),
+    client.from('video_watch_progress').select('video_id,completed').eq('organization_id', organizationId).eq('user_id', context.userId),
+    client.from('video_quiz_results').select('video_id,attempts_count,best_score_percent,passed').eq('organization_id', organizationId).eq('user_id', context.userId),
   ])
 
   throwDatabaseError(organizationResult.error, 'No se pudo leer la organización')
@@ -400,6 +560,15 @@ export async function loadVideoHubSnapshot(options = {}) {
   throwDatabaseError(rolesResult.error, 'No se pudieron leer los permisos de secciones')
   throwDatabaseError(videosResult.error, 'No se pudieron leer los videos')
   throwDatabaseError(assignmentsResult.error, 'No se pudieron leer los permisos de videos')
+  throwDatabaseError(myProgressResult.error, 'No se pudo leer tu progreso')
+  // Los cuestionarios son una función opcional que depende de una migración
+  // aparte (video_quizzes / video_quiz_results). Si esa migración todavía no
+  // se aplicó en este proyecto de Supabase, estas dos consultas fallan con
+  // "tabla no encontrada"; en vez de tumbar toda la carga (login, videos,
+  // secciones), se degrada a "sin cuestionarios" y el resto de la app sigue
+  // funcionando con normalidad.
+  if (quizzesResult.error) console.warn('No se pudieron leer los cuestionarios (¿falta aplicar la migración?):', quizzesResult.error.message)
+  if (myQuizResultsResult.error) console.warn('No se pudieron leer tus cuestionarios (¿falta aplicar la migración?):', myQuizResultsResult.error.message)
 
   const sectionRows = sectionsResult.data || []
   const videoRows = videosResult.data || []
@@ -423,6 +592,9 @@ export async function loadVideoHubSnapshot(options = {}) {
     ]),
   )
   const resolvedUrlByVideo = new Map(resolvedSourceEntries)
+  const quizByVideo = new Map((quizzesResult.data || []).map((row) => [row.video_id, row]))
+  const myProgressByVideo = new Map((myProgressResult.data || []).map((row) => [row.video_id, row]))
+  const myQuizResultByVideo = new Map((myQuizResultsResult.data || []).map((row) => [row.video_id, row]))
 
   const sections = sectionRows.map((section) => ({
     id: section.id,
@@ -449,6 +621,8 @@ export async function loadVideoHubSnapshot(options = {}) {
     const source = sourceByVideo.get(video.id)
     const resolvedSource = resolvedUrlByVideo.get(video.id) || { url: '', expiresAt: null }
     const resolvedUrl = resolvedSource.url
+    const quizRow = quizByVideo.get(video.id)
+    const quizResultRow = myQuizResultByVideo.get(video.id)
     return {
       id: video.id,
       title: video.title,
@@ -460,6 +634,16 @@ export async function loadVideoHubSnapshot(options = {}) {
       locked,
       featured: Boolean(video.featured),
       createdAt: video.created_at,
+      watched: Boolean(myProgressByVideo.get(video.id)?.completed),
+      quiz: quizRow ? {
+        passingScorePercent: quizRow.passing_score_percent,
+        questionCount: quizRow.question_count,
+      } : null,
+      quizResult: quizResultRow ? {
+        attemptsCount: quizResultRow.attempts_count,
+        bestScorePercent: quizResultRow.best_score_percent,
+        passed: Boolean(quizResultRow.passed),
+      } : null,
       source: source ? {
         provider: source.provider,
         sourceRef: source.source_ref,

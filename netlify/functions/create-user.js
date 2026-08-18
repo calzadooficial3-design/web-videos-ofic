@@ -11,6 +11,8 @@ const USERNAME_PATTERN = /^[a-z0-9._-]{3,32}$/
 const MIN_PASSWORD_LENGTH = 8
 const MAX_PASSWORD_LENGTH = 128
 const MAX_DISPLAY_NAME_LENGTH = 80
+const MAX_JOB_TITLE_LENGTH = 120
+const MAX_DEPARTMENT_LENGTH = 120
 
 function normalizeUsername(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : ''
@@ -56,6 +58,8 @@ export default async function createUser(request) {
     const password = typeof body.password === 'string' ? body.password : ''
     const role = typeof body.role === 'string' ? body.role : ''
     const displayName = String(body.displayName || '').trim().slice(0, MAX_DISPLAY_NAME_LENGTH)
+    const jobTitle = String(body.jobTitle || '').trim().slice(0, MAX_JOB_TITLE_LENGTH)
+    const department = String(body.department || '').trim().slice(0, MAX_DEPARTMENT_LENGTH)
 
     if (!USERNAME_PATTERN.test(username)) {
       return jsonResponse({ error: 'El usuario debe tener entre 3 y 32 caracteres (minúsculas, números, puntos, guiones).' }, 400)
@@ -68,6 +72,12 @@ export default async function createUser(request) {
     }
     if (!displayName) {
       return jsonResponse({ error: 'Escribe un nombre para el usuario.' }, 400)
+    }
+    if (!jobTitle) {
+      return jsonResponse({ error: 'Escribe el cargo del usuario.' }, 400)
+    }
+    if (!department) {
+      return jsonResponse({ error: 'Escribe el área del usuario.' }, 400)
     }
 
     const { data: existingProfile, error: existingProfileError } = await serviceClient
@@ -104,6 +114,8 @@ export default async function createUser(request) {
       role,
       display_name: displayName,
       username,
+      job_title: jobTitle,
+      department,
       active: true,
     })
 

@@ -10,6 +10,8 @@ const MANAGED_ROLES = ['operator', 'boss']
 const MIN_PASSWORD_LENGTH = 8
 const MAX_PASSWORD_LENGTH = 128
 const MAX_DISPLAY_NAME_LENGTH = 80
+const MAX_JOB_TITLE_LENGTH = 120
+const MAX_DEPARTMENT_LENGTH = 120
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export default async function updateUser(request) {
@@ -85,6 +87,22 @@ export default async function updateUser(request) {
         return jsonResponse({ error: 'El rol debe ser operante o jefe.' }, 400)
       }
       updates.role = body.role
+    }
+
+    if (body.jobTitle !== undefined) {
+      const jobTitle = String(body.jobTitle || '').trim().slice(0, MAX_JOB_TITLE_LENGTH)
+      if (!jobTitle) {
+        return jsonResponse({ error: 'Escribe el cargo del usuario.' }, 400)
+      }
+      updates.job_title = jobTitle
+    }
+
+    if (body.department !== undefined) {
+      const department = String(body.department || '').trim().slice(0, MAX_DEPARTMENT_LENGTH)
+      if (!department) {
+        return jsonResponse({ error: 'Escribe el área del usuario.' }, 400)
+      }
+      updates.department = department
     }
 
     if (body.active !== undefined) {
