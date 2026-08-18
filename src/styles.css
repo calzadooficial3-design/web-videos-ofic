@@ -261,6 +261,12 @@ button { cursor: pointer; }
 .player-quiz__result--passed { color: var(--success); background: rgba(95,201,155,.1); }
 .player-quiz__result--failed { color: var(--red-bright); background: var(--red-soft); }
 .player-quiz__actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 16px; }
+.player-quiz__intro { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
+.player-quiz__photo-notice { display: flex; align-items: center; gap: 8px; margin: 0; padding: 10px 12px; color: var(--muted); border: 1px solid var(--border); border-radius: 9px; background: var(--bg-soft); font-size: 10px; }
+.player-quiz__camera { display: flex; flex-direction: column; gap: 12px; }
+.player-quiz__camera > p { margin: 0; color: var(--muted); font-size: 10px; }
+.player-quiz__camera-preview { width: 100%; max-width: 420px; aspect-ratio: 4 / 3; border: 1px solid var(--border-strong); border-radius: 12px; background: #000; object-fit: cover; transform: scaleX(-1); }
+.quiz-attempt__photo { margin: 8px 0 4px; }
 
 /* Users and preview */
 .access-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 14px; align-items: start; }.access-panel { overflow: hidden; }.access-panel .form-actions { margin: 0 23px; padding-bottom: 20px; }.access-error { margin: 0 23px 12px; }

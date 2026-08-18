@@ -104,6 +104,7 @@ function mapSettings(row) {
     welcomeMessage: row.welcome_message,
     supportMessage: row.support_message,
     allowLightMode: row.allow_light_mode,
+    requireQuizPhoto: Boolean(row.require_quiz_photo),
   }
 }
 
@@ -380,6 +381,7 @@ function mapQuizAttemptRow(row) {
     scorePercent: row.score_percent,
     passed: Boolean(row.passed),
     createdAt: row.created_at,
+    photoPath: row.photo_path || null,
     answers: (row.answers || []).map((answer) => ({
       questionId: answer.questionId,
       prompt: answer.prompt,
@@ -398,7 +400,7 @@ function mapQuizAttemptRow(row) {
 export async function listQuizAttemptsForUser(userId) {
   const { data, error } = await getClient()
     .from('video_quiz_attempts')
-    .select('id,video_id,user_id,attempt_number,score_percent,passed,answers,created_at')
+    .select('id,video_id,user_id,attempt_number,score_percent,passed,answers,photo_path,created_at')
     .eq('user_id', userId)
     .order('video_id', { ascending: true })
     .order('attempt_number', { ascending: true })
@@ -416,7 +418,7 @@ export async function listAllQuizAttempts() {
   const context = await getCurrentAccessContext()
   const { data, error } = await getClient()
     .from('video_quiz_attempts')
-    .select('id,video_id,user_id,attempt_number,score_percent,passed,answers,created_at')
+    .select('id,video_id,user_id,attempt_number,score_percent,passed,answers,photo_path,created_at')
     .eq('organization_id', context.organizationId)
     .order('user_id', { ascending: true })
     .order('video_id', { ascending: true })
@@ -480,10 +482,11 @@ export async function getPlayableVideoQuiz(videoId) {
 }
 
 /** Envía las respuestas; el servidor corrige y nunca confía en un puntaje calculado en el navegador. */
-export async function submitVideoQuizAttempt(videoId, answers) {
+export async function submitVideoQuizAttempt(videoId, answers, photoPath = null) {
   const { data, error } = await getClient().rpc('submit_video_quiz_attempt', {
     p_video_id: videoId,
     p_answers: answers.map((answer) => ({ questionId: answer.questionId, optionId: answer.optionId })),
+    p_photo_path: photoPath || null,
   })
   throwDatabaseError(error, 'No se pudo enviar el cuestionario')
   return {
@@ -495,6 +498,35 @@ export async function submitVideoQuizAttempt(videoId, answers) {
     attemptsCount: data.attemptsCount,
     bestScorePercent: data.bestScorePercent,
   }
+}
+
+const QUIZ_PHOTOS_BUCKET = 'quiz-photos'
+
+/**
+ * Sube la foto tomada justo antes de un intento de cuestionario. La ruta
+ * codifica organización/usuario/video para que las políticas de Storage
+ * puedan aplicar el mismo criterio "propio o admin" que el resto de las
+ * tablas, sin depender de metadata adicional.
+ */
+export async function uploadQuizAttemptPhoto({ organizationId, userId, videoId, blob }) {
+  if (!organizationId || !userId || !videoId || !blob) {
+    throw new VideoHubApiError('Falta información para guardar la foto.', { code: 'INVALID_PHOTO_UPLOAD' })
+  }
+  const path = `${organizationId}/${userId}/${videoId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`
+  const { error } = await getClient().storage.from(QUIZ_PHOTOS_BUCKET).upload(path, blob, {
+    contentType: 'image/jpeg',
+    upsert: false,
+  })
+  throwDatabaseError(error, 'No se pudo guardar la foto')
+  return path
+}
+
+/** URL firmada de corta duración para que el admin revise la foto de un intento. */
+export async function getQuizAttemptPhotoUrl(photoPath) {
+  if (!photoPath) return ''
+  const { data, error } = await getClient().storage.from(QUIZ_PHOTOS_BUCKET).createSignedUrl(photoPath, 120)
+  throwDatabaseError(error, 'No se pudo abrir la foto')
+  return data?.signedUrl || ''
 }
 
 export function onAuthStateChange(callback) {
@@ -544,7 +576,7 @@ export async function loadVideoHubSnapshot(options = {}) {
 
   const [organizationResult, settingsResult, sectionsResult, rolesResult, videosResult, assignmentsResult, quizzesResult, myProgressResult, myQuizResultsResult] = await Promise.all([
     client.from('organizations').select('id,name,slug,logo_url').eq('id', organizationId).single(),
-    client.from('app_settings').select('product_name,welcome_title,welcome_message,support_message,allow_light_mode').eq('organization_id', organizationId).maybeSingle(),
+    client.from('app_settings').select('product_name,welcome_title,welcome_message,support_message,allow_light_mode,require_quiz_photo').eq('organization_id', organizationId).maybeSingle(),
     client.from('sections').select('id,name,slug,icon,sort_order,created_at').eq('organization_id', organizationId).eq('active', true).order('sort_order'),
     client.from('section_roles').select('section_id,role,visible').eq('organization_id', organizationId),
     client.from('videos').select('id,title,description,duration_label,duration_seconds,featured,created_at').eq('organization_id', organizationId).eq('active', true).order('created_at', { ascending: false }),
@@ -891,6 +923,7 @@ export async function saveAdminSnapshot(snapshot, options = {}) {
     welcome_message: String(snapshot.settings.welcomeMessage || '').trim(),
     support_message: String(snapshot.settings.supportMessage || '').trim(),
     allow_light_mode: snapshot.settings.allowLightMode !== false,
+    require_quiz_photo: Boolean(snapshot.settings.requireQuizPhoto),
   } : null
 
   const session = await getCurrentSession()

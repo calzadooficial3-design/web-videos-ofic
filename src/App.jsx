@@ -5,6 +5,7 @@ import {
   BarChart3,
   BookOpen,
   BriefcaseBusiness,
+  Camera,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -54,6 +55,7 @@ import {
   getCurrentAccessContext,
   getCurrentSession,
   getPlayableVideoQuiz,
+  getQuizAttemptPhotoUrl,
   listAllQuizAttempts,
   listManagedUsers,
   listQuizAttemptsForUser,
@@ -69,6 +71,7 @@ import {
   signOut,
   submitVideoQuizAttempt,
   updateUser,
+  uploadQuizAttemptPhoto,
 } from './lib/videoHubApi'
 import { createAdminSaveRevisionTracker } from './lib/adminSaveRevision'
 import { downloadUsersExcel } from './lib/exportUsersExcel'
@@ -935,6 +938,7 @@ function SettingsManager({ data, setData }) {
     welcomeMessage: '',
     supportMessage: 'Contacta a tu administrador',
     allowLightMode: true,
+    requireQuizPhoto: false,
   }
 
   const updateSetting = (key, value) => {
@@ -955,6 +959,7 @@ function SettingsManager({ data, setData }) {
           <div className="form-group general-settings-form__wide"><label>Mensaje de bienvenida</label><textarea value={settings.welcomeMessage} onChange={(event) => updateSetting('welcomeMessage', event.target.value)} rows="4" placeholder="Escribe el mensaje que verán Operante y Jefe." /></div>
           <div className="form-group general-settings-form__wide"><label>Mensaje de ayuda</label><input value={settings.supportMessage} onChange={(event) => updateSetting('supportMessage', event.target.value)} placeholder="Ej. Escribe al administrador" /></div>
           <label className="feature-check general-settings-form__wide"><input type="checkbox" checked={settings.allowLightMode !== false} onChange={(event) => updateSetting('allowLightMode', event.target.checked)} /><span><Sun size={16} /></span><div><strong>Permitir modo claro</strong><small>Los usuarios podrán alternar entre el tema oscuro y claro.</small></div></label>
+          <label className="feature-check general-settings-form__wide"><input type="checkbox" checked={Boolean(settings.requireQuizPhoto)} onChange={(event) => updateSetting('requireQuizPhoto', event.target.checked)} /><span><Camera size={16} /></span><div><strong>Solicitar foto al iniciar el cuestionario</strong><small>Antes de responder, cada usuario deberá tomarse una foto con su cámara. Se guarda junto al intento para que el administrador la revise.</small></div></label>
         </div>
       </section>
       <div className="info-callout"><Settings2 size={19} /><div><strong>Guardado automático</strong><p>El indicador superior confirma cuándo la configuración ya está persistida en Supabase.</p></div></div>
@@ -1887,6 +1892,7 @@ function UserActivityModal({ user, videos, watchedVideoIds, quizResults, quizAtt
                       <span className={`quiz-attempt__score ${attempt.passed ? 'quiz-attempt__score--passed' : 'quiz-attempt__score--failed'}`}>{attempt.scorePercent}% · {attempt.passed ? 'Aprobado' : 'No aprobado'}</span>
                       <span className="quiz-attempt__date">{new Date(attempt.createdAt).toLocaleString('es-PE', { dateStyle: 'medium', timeStyle: 'short' })}</span>
                     </summary>
+                    {attempt.photoPath && <AttemptPhotoLink photoPath={attempt.photoPath} />}
                     <ul className="quiz-attempt__answers">
                       {attempt.answers.map((answer, index) => (
                         <li className={answer.isCorrect ? 'is-correct' : 'is-incorrect'} key={answer.questionId || index}>
@@ -1905,6 +1911,33 @@ function UserActivityModal({ user, videos, watchedVideoIds, quizResults, quizAtt
           })}
         </div>
       </div>
+    </div>
+  )
+}
+
+function AttemptPhotoLink({ photoPath }) {
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const openPhoto = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const url = await getQuizAttemptPhotoUrl(photoPath)
+      if (url) window.open(url, '_blank', 'noopener,noreferrer')
+    } catch (photoError) {
+      setError(getErrorMessage(photoError, 'No se pudo abrir la foto.'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="quiz-attempt__photo">
+      <button type="button" className="text-button" onClick={openPhoto} disabled={loading}>
+        <Camera size={13} /> {loading ? 'Abriendo…' : 'Ver foto del intento'}
+      </button>
+      {error && <span className="form-error">{error}</span>}
     </div>
   )
 }
@@ -2373,7 +2406,7 @@ function VideoPlayerPage({ video, role, userId, data, onBack, onPlay }) {
             </div>
             <h1>{video.title}</h1><p>{video.description}</p>
           </div>
-          {showQuiz && <PlayerQuiz video={video} />}
+          {showQuiz && <PlayerQuiz video={video} userId={userId} organizationId={data.organizationId} requirePhoto={Boolean(data.settings?.requireQuizPhoto)} />}
         </div>
         <aside className="related-panel"><span className="eyebrow eyebrow--plain">A CONTINUACIÓN</span><h3>En esta sección</h3>{related.map((item) => <button key={item.id} onClick={() => onPlay(item)}><span><Play size={13} fill="currentColor" /></span><div><strong>{item.title}</strong><small>{item.duration}</small></div></button>)}{!related.length && <p>No hay más videos en esta sección.</p>}<div className="privacy-mini"><ShieldCheck size={17} /><span>Contenido autorizado para {ROLE_META[role].label}</span></div></aside>
       </div>
@@ -2381,27 +2414,89 @@ function VideoPlayerPage({ video, role, userId, data, onBack, onPlay }) {
   )
 }
 
-function PlayerQuiz({ video }) {
+function PlayerQuiz({ video, userId, organizationId, requirePhoto }) {
   const passingScore = video.quiz?.passingScorePercent ?? 70
-  const [loading, setLoading] = useState(true)
+  // 'intro' -> (si se exige foto) 'camera' -> 'quiz'
+  const [phase, setPhase] = useState('intro')
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [questions, setQuestions] = useState([])
   const [answers, setAnswers] = useState({})
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState(null)
+  const [photoPath, setPhotoPath] = useState(null)
+  const [cameraError, setCameraError] = useState('')
+  const [capturingPhoto, setCapturingPhoto] = useState(false)
+  const cameraVideoRef = useRef(null)
+  const cameraStreamRef = useRef(null)
 
   useEffect(() => {
+    setPhase('intro')
+    setQuestions([])
+    setAnswers({})
+    setResult(null)
+    setPhotoPath(null)
+    setError('')
+    setCameraError('')
+  }, [video.id])
+
+  useEffect(() => {
+    if (phase !== 'quiz' || questions.length || loading) return
     let active = true
     setLoading(true)
     setError('')
-    setResult(null)
-    setAnswers({})
     getPlayableVideoQuiz(video.id)
       .then((quiz) => { if (active) setQuestions(quiz?.questions || []) })
       .catch((quizError) => { if (active) setError(getErrorMessage(quizError, 'No se pudo cargar el cuestionario.')) })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [video.id])
+  }, [phase, video.id, questions.length, loading])
+
+  useEffect(() => {
+    if (phase !== 'camera') return
+    let cancelled = false
+    setCameraError('')
+    navigator.mediaDevices?.getUserMedia({ video: { facingMode: 'user' }, audio: false })
+      .then((stream) => {
+        if (cancelled) { stream.getTracks().forEach((track) => track.stop()); return }
+        cameraStreamRef.current = stream
+        if (cameraVideoRef.current) cameraVideoRef.current.srcObject = stream
+      })
+      .catch(() => { if (!cancelled) setCameraError('No se pudo acceder a la cámara. Revisa los permisos del navegador e inténtalo de nuevo.') })
+    return () => {
+      cancelled = true
+      cameraStreamRef.current?.getTracks().forEach((track) => track.stop())
+      cameraStreamRef.current = null
+    }
+  }, [phase])
+
+  const startQuiz = () => {
+    setError('')
+    setPhase(requirePhoto ? 'camera' : 'quiz')
+  }
+
+  const capturePhoto = async () => {
+    const videoEl = cameraVideoRef.current
+    if (!videoEl || !videoEl.videoWidth) return
+    setCapturingPhoto(true)
+    setCameraError('')
+    try {
+      const canvas = document.createElement('canvas')
+      canvas.width = videoEl.videoWidth
+      canvas.height = videoEl.videoHeight
+      canvas.getContext('2d').drawImage(videoEl, 0, 0)
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85))
+      if (!blob) throw new Error('No se pudo capturar la foto.')
+      const path = await uploadQuizAttemptPhoto({ organizationId, userId, videoId: video.id, blob })
+      cameraStreamRef.current?.getTracks().forEach((track) => track.stop())
+      setPhotoPath(path)
+      setPhase('quiz')
+    } catch (captureError) {
+      setCameraError(getErrorMessage(captureError, 'No se pudo guardar la foto. Inténtalo de nuevo.'))
+    } finally {
+      setCapturingPhoto(false)
+    }
+  }
 
   const selectAnswer = (questionId, optionId) => {
     setAnswers((current) => ({ ...current, [questionId]: optionId }))
@@ -2415,7 +2510,7 @@ function PlayerQuiz({ video }) {
     setError('')
     try {
       const payload = questions.map((question) => ({ questionId: question.id, optionId: answers[question.id] }))
-      setResult(await submitVideoQuizAttempt(video.id, payload))
+      setResult(await submitVideoQuizAttempt(video.id, payload, photoPath))
     } catch (submitError) {
       setError(getErrorMessage(submitError, 'No se pudo enviar el cuestionario.'))
     } finally {
@@ -2426,6 +2521,9 @@ function PlayerQuiz({ video }) {
   const retry = () => {
     setResult(null)
     setAnswers({})
+    setPhotoPath(null)
+    setQuestions([])
+    setPhase(requirePhoto ? 'camera' : 'quiz')
   }
 
   return (
@@ -2438,41 +2536,66 @@ function PlayerQuiz({ video }) {
         </div>
       </div>
 
-      {loading && <p>Cargando cuestionario…</p>}
       {error && <p className="form-error">{error}</p>}
 
-      {!loading && result && (
-        <div className={`player-quiz__result player-quiz__result--${result.passed ? 'passed' : 'failed'}`}>
-          {result.passed ? <CircleCheck size={20} /> : <CircleAlert size={20} />}
-          <div>
-            <strong>{result.passed ? '¡Aprobado!' : 'Aún no alcanzas el puntaje mínimo'}</strong>
-            <p>Obtuviste {result.correctCount} de {result.totalQuestions} correctas ({result.scorePercent}%).</p>
+      {phase === 'intro' && (
+        <div className="player-quiz__intro">
+          {requirePhoto && <p className="player-quiz__photo-notice"><Camera size={15} /> Al iniciar se te pedirá tomarte una foto para verificar quién responde.</p>}
+          <button className="primary-button" type="button" onClick={startQuiz}>Iniciar cuestionario</button>
+        </div>
+      )}
+
+      {phase === 'camera' && (
+        <div className="player-quiz__camera">
+          <p>Tómate una foto para comenzar el cuestionario.</p>
+          {cameraError && <p className="form-error">{cameraError}</p>}
+          <video ref={cameraVideoRef} autoPlay playsInline muted className="player-quiz__camera-preview" />
+          <div className="player-quiz__actions">
+            <button className="primary-button" type="button" onClick={capturePhoto} disabled={capturingPhoto || Boolean(cameraError)}>
+              <Camera size={15} /> {capturingPhoto ? 'Guardando foto…' : 'Tomar foto'}
+            </button>
           </div>
         </div>
       )}
 
-      {!loading && !result && questions.map((question, index) => (
-        <div className="player-quiz__question" key={question.id}>
-          <strong>{index + 1}. {question.prompt}</strong>
-          {question.options.map((option) => (
-            <label className="player-quiz__option" key={option.id}>
-              <input
-                type="radio"
-                name={`quiz-${video.id}-${question.id}`}
-                checked={answers[question.id] === option.id}
-                onChange={() => selectAnswer(question.id, option.id)}
-              />
-              {option.label}
-            </label>
-          ))}
-        </div>
-      ))}
+      {phase === 'quiz' && (
+        <>
+          {loading && <p>Cargando cuestionario…</p>}
 
-      {!loading && (
-        <div className="player-quiz__actions">
-          {result && !result.passed && <button className="secondary-button" type="button" onClick={retry}>Reintentar</button>}
-          {!result && <button className="primary-button" type="button" disabled={!allAnswered || submitting} onClick={submit}>{submitting ? 'Enviando…' : 'Enviar respuestas'}</button>}
-        </div>
+          {!loading && result && (
+            <div className={`player-quiz__result player-quiz__result--${result.passed ? 'passed' : 'failed'}`}>
+              {result.passed ? <CircleCheck size={20} /> : <CircleAlert size={20} />}
+              <div>
+                <strong>{result.passed ? '¡Aprobado!' : 'Aún no alcanzas el puntaje mínimo'}</strong>
+                <p>Obtuviste {result.correctCount} de {result.totalQuestions} correctas ({result.scorePercent}%).</p>
+              </div>
+            </div>
+          )}
+
+          {!loading && !result && questions.map((question, index) => (
+            <div className="player-quiz__question" key={question.id}>
+              <strong>{index + 1}. {question.prompt}</strong>
+              {question.options.map((option) => (
+                <label className="player-quiz__option" key={option.id}>
+                  <input
+                    type="radio"
+                    name={`quiz-${video.id}-${question.id}`}
+                    checked={answers[question.id] === option.id}
+                    onChange={() => selectAnswer(question.id, option.id)}
+                  />
+                  {option.label}
+                </label>
+              ))}
+            </div>
+          ))}
+
+          {!loading && (
+            <div className="player-quiz__actions">
+              {result && !result.passed && <button className="secondary-button" type="button" onClick={retry}>Reintentar</button>}
+              {!result && <button className="primary-button" type="button" disabled={!allAnswered || submitting} onClick={submit}>{submitting ? 'Enviando…' : 'Enviar respuestas'}</button>}
+            </div>
+          )}
+        </>
       )}
     </div>
   )
