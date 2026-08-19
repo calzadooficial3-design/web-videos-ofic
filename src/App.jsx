@@ -439,7 +439,11 @@ function App() {
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') refreshFromSupabase()
     }
-    const interval = window.setInterval(refreshFromSupabase, 15_000)
+    // 90s en vez de 15s: en un proyecto de Supabase con compute chico, un
+    // sondeo cada 15 segundos por cada pestaña abierta es una carga base
+    // innecesariamente alta. La revisión al enfocar la pestaña/ventana ya
+    // cubre el caso de "me fui y volví"; este intervalo es solo respaldo.
+    const interval = window.setInterval(refreshFromSupabase, 90_000)
     window.addEventListener('focus', handleFocus)
     document.addEventListener('visibilitychange', handleVisibility)
 
