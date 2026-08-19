@@ -94,6 +94,12 @@ export default async function saveAdminSnapshot(request) {
           code: 'STALE_SNAPSHOT',
         }, 409)
       }
+      if (error.code === '55P03' || error.message === 'SAVE_BUSY') {
+        return jsonResponse({
+          error: 'Hay otro guardado en curso para esta organización. Inténtalo de nuevo en unos segundos.',
+          code: 'SAVE_BUSY',
+        }, 409)
+      }
       const status = error.code === '42501'
         ? 403
         : ['21000', '22007', '22023', '22P02', '54000'].includes(error.code)

@@ -204,6 +204,10 @@ function App() {
   const driveImportRequestKeyRef = useRef('')
   const sessionUserIdRef = useRef(null)
   const loginInProgressRef = useRef(false)
+  // IDs de video que Supabase ya confirmó (existen de verdad en la tabla
+  // videos), separado de `data.videos` porque ese último también incluye
+  // ediciones optimistas que todavía no terminaron de guardarse.
+  const persistedVideoIdsRef = useRef(new Set())
 
   if (!contentRevisionTrackerRef.current) {
     contentRevisionTrackerRef.current = createAdminSaveRevisionTracker()
@@ -222,6 +226,7 @@ function App() {
     setAccessContext(null)
     setData(null)
     latestDataRef.current = null
+    persistedVideoIdsRef.current = new Set()
     lastSavedFingerprintRef.current = ''
     driveImportRequestKeyRef.current = ''
     contentRevisionTrackerRef.current.reset()
@@ -250,6 +255,7 @@ function App() {
       contentRevisionTrackerRef.current.reset(snapshot.revision)
       lastSavedFingerprintRef.current = editableSnapshotFingerprint(snapshot)
       latestDataRef.current = snapshot
+      persistedVideoIdsRef.current = new Set(snapshot.videos.map((video) => video.id))
       setAccessContext(context)
       setData(snapshot)
       setSaveState({ status: 'saved', error: '' })
@@ -341,6 +347,7 @@ function App() {
             { context },
           )
           contentRevisionTrackerRef.current.confirm(savedSnapshot.revision)
+          persistedVideoIdsRef.current = new Set(savedSnapshot.videos.map((video) => video.id))
           if (revision === saveRevisionRef.current) {
             const savedFingerprint = editableSnapshotFingerprint(savedSnapshot)
             lastSavedFingerprintRef.current = savedFingerprint
@@ -411,6 +418,7 @@ function App() {
         contentRevisionTrackerRef.current.reset(snapshot.revision)
         lastSavedFingerprintRef.current = editableSnapshotFingerprint(snapshot)
         latestDataRef.current = snapshot
+        persistedVideoIdsRef.current = new Set(snapshot.videos.map((video) => video.id))
         if (
           freshContext.role !== accessContext.role
           || freshContext.organizationId !== accessContext.organizationId
@@ -512,10 +520,19 @@ function App() {
     setLoggingOut(true)
     setLoadError('')
 
+    // Un guardado atascado (por ejemplo, varias pestañas de admin guardando
+    // a la vez) nunca debe impedir cerrar sesión indefinidamente: se espera
+    // un tiempo razonable y, si no termina, se cierra la sesión igual.
+    const LOGOUT_SAVE_TIMEOUT_MS = 8000
+    const withTimeout = (promise) => Promise.race([
+      promise,
+      new Promise((resolve) => window.setTimeout(resolve, LOGOUT_SAVE_TIMEOUT_MS)),
+    ])
+
     try {
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
       saveRevisionRef.current += 1
-      await saveQueueRef.current.catch(() => undefined)
+      await withTimeout(saveQueueRef.current.catch(() => undefined))
 
       const currentData = latestDataRef.current
       if (
@@ -524,12 +541,14 @@ function App() {
         && editableSnapshotFingerprint(currentData) !== lastSavedFingerprintRef.current
       ) {
         setSaveState({ status: 'saving', error: '' })
-        const savedSnapshot = await saveAdminSnapshot(
+        const savedSnapshot = await withTimeout(saveAdminSnapshot(
           contentRevisionTrackerRef.current.rebase(currentData),
           { context: accessContext },
-        )
-        contentRevisionTrackerRef.current.confirm(savedSnapshot.revision)
-        lastSavedFingerprintRef.current = editableSnapshotFingerprint(savedSnapshot)
+        ))
+        if (savedSnapshot) {
+          contentRevisionTrackerRef.current.confirm(savedSnapshot.revision)
+          lastSavedFingerprintRef.current = editableSnapshotFingerprint(savedSnapshot)
+        }
       }
 
       await signOut()
@@ -572,6 +591,7 @@ function App() {
         theme={theme}
         toggleTheme={toggleTheme}
         saveState={saveState}
+        persistedVideoIdsRef={persistedVideoIdsRef}
         onRetrySave={retrySave}
         onCreateUser={createUser}
         onUpdateUser={updateUser}
@@ -831,6 +851,7 @@ function AdminApp({
   theme,
   toggleTheme,
   saveState,
+  persistedVideoIdsRef,
   onRetrySave,
   onCreateUser,
   onUpdateUser,
@@ -919,7 +940,7 @@ function AdminApp({
           </div>
           {page === 'overview' && <AdminOverview data={data} onNavigate={navigate} />}
           {page === 'sections' && <SectionsManager data={data} setData={setData} onRemove={removeSection} />}
-          {page === 'videos' && <VideosManager data={data} setData={setData} />}
+          {page === 'videos' && <VideosManager data={data} setData={setData} persistedVideoIdsRef={persistedVideoIdsRef} />}
           {page === 'settings' && <SettingsManager data={data} setData={setData} />}
           {page === 'users' && <UsersManager onCreateUser={onCreateUser} onUpdateUser={onUpdateUser} />}
           {page === 'progress' && <ProgressManager data={data} />}
@@ -1132,7 +1153,7 @@ const emptyVideoDraft = {
   bossLocked: false,
 }
 
-function VideosManager({ data, setData }) {
+function VideosManager({ data, setData, persistedVideoIdsRef }) {
   const [formOpen, setFormOpen] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [draft, setDraft] = useState(emptyVideoDraft)
@@ -1196,12 +1217,16 @@ function VideosManager({ data, setData }) {
       assignments,
       locked,
     }
-    setData((current) => editingId
-      ? { ...current, videos: current.videos.map((video) => video.id === editingId ? { ...video, ...payload } : video) }
-      : { ...current, videos: [{ ...payload, id: crypto.randomUUID(), createdAt: new Date().toISOString() }, ...current.videos] })
-    setFormOpen(false)
-    setEditingId(null)
-    setDraft(emptyVideoDraft)
+    if (editingId) {
+      setData((current) => ({ ...current, videos: current.videos.map((video) => video.id === editingId ? { ...video, ...payload } : video) }))
+    } else {
+      // Al crear, se queda en modo edición del video recién agregado (en vez
+      // de cerrar el formulario) para que se pueda seguir directo con su
+      // cuestionario, sin tener que volver a abrir "Editar" a mano.
+      const newId = crypto.randomUUID()
+      setData((current) => ({ ...current, videos: [{ ...payload, id: newId, createdAt: new Date().toISOString() }, ...current.videos] }))
+      setEditingId(newId)
+    }
   }
 
   const deleteVideo = (id) => {
@@ -1256,7 +1281,7 @@ function VideosManager({ data, setData }) {
           </form>
           {editingId && (
             <div className="quiz-panel-wrap">
-              <VideoQuizEditor videoId={editingId} />
+              <VideoQuizEditor videoId={editingId} videoPending={!persistedVideoIdsRef.current.has(editingId)} />
             </div>
           )}
         </section>
@@ -1296,7 +1321,7 @@ function emptyQuizQuestion() {
   }
 }
 
-function VideoQuizEditor({ videoId }) {
+function VideoQuizEditor({ videoId, videoPending }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -1306,6 +1331,7 @@ function VideoQuizEditor({ videoId }) {
   const [savedNote, setSavedNote] = useState('')
 
   useEffect(() => {
+    if (videoPending) { setLoading(false); return undefined }
     let active = true
     setLoading(true)
     setError('')
@@ -1325,7 +1351,7 @@ function VideoQuizEditor({ videoId }) {
       .catch((quizError) => { if (active) setError(getErrorMessage(quizError, 'No se pudo cargar el cuestionario.')) })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [videoId])
+  }, [videoId, videoPending])
 
   const updateQuestion = (questionId, patch) => {
     setQuestions((current) => current.map((question) => (question.id === questionId ? { ...question, ...patch } : question)))
@@ -1357,6 +1383,7 @@ function VideoQuizEditor({ videoId }) {
 
   const save = async () => {
     setError('')
+    if (videoPending) { setError('Espera a que el video termine de guardarse antes de agregar su cuestionario.'); return }
     if (!questions.length) { setError('Agrega al menos una pregunta.'); return }
     for (const question of questions) {
       if (!question.prompt.trim()) { setError('Cada pregunta necesita un enunciado.'); return }
@@ -1392,6 +1419,17 @@ function VideoQuizEditor({ videoId }) {
     } finally {
       setSaving(false)
     }
+  }
+
+  if (videoPending) {
+    return (
+      <div className="quiz-panel">
+        <div className="quiz-panel__head">
+          <div><h3>Cuestionario de comprobación</h3><p>Se muestra cuando el usuario termina de ver el video al 100%.</p></div>
+        </div>
+        <div className="quiz-empty"><ClipboardList size={17} /><span>Este video todavía no está guardado en Supabase (revisa el indicador arriba). Espera a que termine, o corrige el error si aparece, antes de agregarle un cuestionario.</span></div>
+      </div>
+    )
   }
 
   if (loading) return <div className="quiz-panel"><p>Cargando cuestionario…</p></div>
