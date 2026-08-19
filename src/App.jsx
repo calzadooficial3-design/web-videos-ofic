@@ -2466,6 +2466,8 @@ function PlayerQuiz({ video, userId, organizationId, requirePhoto, isWatched }) 
   const [cameraError, setCameraError] = useState('')
   const [capturingPhoto, setCapturingPhoto] = useState(false)
   const [quizLoadKey, setQuizLoadKey] = useState(0)
+  const [cameraDevices, setCameraDevices] = useState([])
+  const [selectedCameraId, setSelectedCameraId] = useState('')
   const cameraVideoRef = useRef(null)
   const cameraStreamRef = useRef(null)
 
@@ -2496,11 +2498,27 @@ function PlayerQuiz({ video, userId, organizationId, requirePhoto, isWatched }) 
     if (phase !== 'camera') return
     let cancelled = false
     setCameraError('')
-    navigator.mediaDevices?.getUserMedia({ video: { facingMode: 'user' }, audio: false })
-      .then((stream) => {
+    const constraints = selectedCameraId
+      ? { video: { deviceId: { exact: selectedCameraId } }, audio: false }
+      : { video: { facingMode: 'user' }, audio: false }
+    navigator.mediaDevices?.getUserMedia(constraints)
+      .then(async (stream) => {
         if (cancelled) { stream.getTracks().forEach((track) => track.stop()); return }
         cameraStreamRef.current = stream
         if (cameraVideoRef.current) cameraVideoRef.current.srcObject = stream
+
+        // Los nombres de cámara solo se conocen después de dar permiso, así
+        // que la lista de dispositivos se arma recién aquí.
+        const activeDeviceId = stream.getVideoTracks()[0]?.getSettings().deviceId || ''
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices()
+          if (cancelled) return
+          const cameras = devices.filter((device) => device.kind === 'videoinput')
+          setCameraDevices(cameras)
+          if (!selectedCameraId && activeDeviceId) setSelectedCameraId(activeDeviceId)
+        } catch {
+          // Sin lista de dispositivos igual se puede seguir usando la cámara activa.
+        }
       })
       .catch(() => { if (!cancelled) setCameraError('No se pudo acceder a la cámara. Revisa los permisos del navegador e inténtalo de nuevo.') })
     return () => {
@@ -2508,7 +2526,7 @@ function PlayerQuiz({ video, userId, organizationId, requirePhoto, isWatched }) 
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop())
       cameraStreamRef.current = null
     }
-  }, [phase])
+  }, [phase, selectedCameraId])
 
   const startQuiz = () => {
     setError('')
@@ -2604,6 +2622,18 @@ function PlayerQuiz({ video, userId, organizationId, requirePhoto, isWatched }) 
         <div className="player-quiz__camera">
           <p>Tómate una foto para comenzar el cuestionario.</p>
           {cameraError && <p className="form-error">{cameraError}</p>}
+          {cameraDevices.length > 1 && (
+            <div className="form-group player-quiz__camera-select">
+              <label>Cámara</label>
+              <select value={selectedCameraId} onChange={(event) => setSelectedCameraId(event.target.value)}>
+                {cameraDevices.map((device, index) => (
+                  <option value={device.deviceId} key={device.deviceId || index}>
+                    {device.label || `Cámara ${index + 1}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <video ref={cameraVideoRef} autoPlay playsInline muted className="player-quiz__camera-preview" />
           <div className="player-quiz__actions">
             <button className="primary-button" type="button" onClick={capturePhoto} disabled={capturingPhoto || Boolean(cameraError)}>
