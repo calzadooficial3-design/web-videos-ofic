@@ -1,8 +1,6 @@
 import { jsonResponse, methodNotAllowed, readBearerToken, readJsonBody } from './_shared/http.js'
 import {
-  createServerClients,
   createUserClient,
-  getAccessContext,
   getServerConfiguration,
   ServerConfigurationError,
 } from './_shared/supabase-server.js'
@@ -57,21 +55,13 @@ export default async function saveAdminSnapshot(request) {
     }
 
     const configuration = getServerConfiguration()
-    const { publicClient } = createServerClients(configuration)
-    const { data: callerData, error: callerError } = await publicClient.auth.getUser(accessToken)
-    const caller = callerData?.user
-    if (callerError || !caller) return jsonResponse({ error: 'Sesión no válida.' }, 401)
-
-    const accessContext = await getAccessContext(accessToken, configuration)
-    if (
-      !accessContext
-      || accessContext.active !== true
-      || accessContext.userId !== caller.id
-      || accessContext.role !== 'admin'
-    ) {
-      return jsonResponse({ error: 'Solo un administrador puede guardar la configuración.' }, 403)
-    }
-
+    // Antes se validaba la sesión (auth.getUser) y el rol de administrador
+    // (getAccessContext) con dos llamadas RPC adicionales antes de intentar
+    // guardar. Ambas eran redundantes: save_admin_snapshot ya exige una
+    // sesión valida y rol admin dentro del propio SQL (is_admin_for), y
+    // PostgREST ya rechaza un token invalido antes de ejecutar la función.
+    // Quitar esas dos vueltas de red extra reduce el tiempo total lo
+    // suficiente para no chocar con el límite de ejecución de Netlify.
     const userClient = createUserClient(accessToken, configuration)
     const { data: savedRevision, error } = await userClient.rpc('save_admin_snapshot', {
       p_snapshot: snapshot,
